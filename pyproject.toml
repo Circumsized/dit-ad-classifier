@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dit-afq"
+dynamic = ["version"]
+description = "Reproducible AFQ multi-center Alzheimer's disease classification baselines"
+readme = "README.md"
+requires-python = ">=3.10"
+# License intentionally unset: the copyright holder must choose and add a
+# LICENSE file (see docs/LICENSE_TODO.md).  Declaring one here without the file
+# and an owner decision would misstate the distribution terms.
+authors = [{ name = "AI4AD AFQ reproducible baseline" }]
+keywords = ["alzheimer", "dti", "afq", "domain-adaptation", "baseline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    # numpy 2.x breaks the scikit-learn binary build used here; see tests/test_env.py
+    "numpy>=1.24,<2",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "pandas>=2.0",
+    "PyYAML>=6.0",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.2"]
+dev = ["pytest>=7", "pytest-cov>=4"]
+
+[project.scripts]
+dit = "dit.cli.main:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "dit.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["dit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["error::UserWarning:numpy"]

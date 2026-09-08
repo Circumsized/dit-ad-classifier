@@ -131,7 +131,8 @@ if __name__=="__main__":
 
     all_data_list = os.listdir("./new_data/")
     len_train_list=len(all_data_list)
-    random.shuffle(all_data_list)
+    rng = random.Random(42)  # seeded: an unseeded shuffle makes every fold split unreproducible
+    rng.shuffle(all_data_list)
     val1,val2,val3,val4,val5=all_data_list[:int(len_train_list*0.2)],all_data_list[int(len_train_list*0.2):int(len_train_list*0.4)],all_data_list[int(len_train_list*0.4):int(len_train_list*0.6)],all_data_list[int(len_train_list*0.6):int(len_train_list*0.8)],all_data_list[int(len_train_list*0.8):]
     list_vals=[val1,val2,val3,val4,val5]
     for item in list_vals:

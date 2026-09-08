@@ -1,0 +1,24 @@
+# Deep-model variant: the profile Transformer with CORAL domain alignment.
+# Requires the optional torch extra:  pip install -e '.[torch]'
+# Run: python -m dit.cli evaluate --config configs/deep_coral_loso.yaml --synthetic
+# Deep folds retrain the network per outer split, so expect minutes, not seconds.
+
+experiment:
+  model: tract_transformer
+  task: binary
+  split_strategy: loso
+  feature_view: summary        # ignored by the deep path, which keeps 4-D profiles
+  covariate_strategy: feature  # residualize is refused for the deep path
+  smooth_window: 5
+  alignment: coral             # none | coral | mmd | dann
+  deep_calibration: temperature  # none | temperature | sigmoid
+  deep_epochs: 120
+  deep_batch_size: 16
+  deep_patience: 20
+  deep_d_model: 64
+  deep_layers: 3
+  threshold_criterion: f1
+  n_splits: 5
+  inner_splits: 3
+  seed: 42
+  n_jobs: 1
