@@ -1,0 +1,30 @@
+# --- Python runtime ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# --- tool state (local only) ---
+.pytest_cache/
+.mimosa/
+.code-review-graph/
+
+# --- generated outputs (reproduce with `python -m dit.cli ...`) ---
+reports/
+
+# --- coverage and package builds ---
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.whl
+*.tar.gz
+
+# --- proprietary data and trained-model artifacts ---
+*.mat
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
