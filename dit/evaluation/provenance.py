@@ -1,8 +1,8 @@
 """Non-identifying provenance for outer cross-validation folds.
 
-A fold-level comparison is valid only when both results were evaluated on the
-same subjects. The public report therefore carries a digest of sorted indices
-within the task view, never source subject identifiers or imaging data.
+Paired fold comparisons are valid only when both results were evaluated on
+the same subjects. Reports carry a digest of sorted indices within the task
+view rather than source subject identifiers or imaging data.
 """
 
 from __future__ import annotations
@@ -23,12 +23,15 @@ def fold_provenance(
     task: str,
     split_strategy: str,
     site: np.ndarray | None = None,
+    data_digest: str | None = None,
 ) -> dict[str, object]:
     """Return an auditable, non-identifying manifest for one outer test fold.
 
     ``test_index_digest`` is an SHA-256 digest of sorted, little-endian int64
-    task-view positions. It lets reports reject a purported paired comparison
-    if its folds do not hold out the same rows, without exposing subject IDs.
+    task-view positions, used to reject paired comparisons whose folds do not
+    hold out the same rows. ``data_digest`` — when the caller supplies it —
+    identifies the underlying data snapshot, so results from different
+    snapshots cannot be paired even when their fold structure matches.
     """
 
     indices = np.asarray(test_indices, dtype=np.int64).reshape(-1)
@@ -46,9 +49,8 @@ def fold_provenance(
         str(int(label)): int(np.sum(test_labels == label))
         for label in expected_labels
     }
-    # A fold whose test set misses a class present in the task view yields a
-    # metric on a different label set than full folds, so it must not be pooled
-    # silently.  Flag it here where the class counts are known.
+    # A fold whose test set misses a class present in the task view scores on
+    # a different label set than full folds, so flag it rather than pool it.
     fold_comparable = all(count > 0 for count in class_counts.values())
     manifest: dict[str, object] = {
         "task": str(task),
@@ -57,6 +59,8 @@ def fold_provenance(
         "test_class_counts": class_counts,
         "fold_comparable": fold_comparable,
     }
+    if data_digest:
+        manifest["data_digest"] = str(data_digest)
 
     if normalized_strategy in _LOSO_NAMES:
         if site is None:

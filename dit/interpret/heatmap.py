@@ -151,11 +151,9 @@ def literature_hits(
 ) -> dict[str, object]:
     """Report whether the model's strongest nodes fall in published regions.
 
-    For every tract whose name matches a :data:`LITERATURE_REGIONS` entry, the
-    peak-importance node is compared against the expected interval.  A hit is
-    evidence the model recovered a known biomarker; a miss is reported too, so
-    the analysis is honest either way.  This is descriptive, not a claim about
-    real-data performance.
+    For each tract matching :data:`LITERATURE_REGIONS`, compares the
+    peak-importance node with the expected interval and reports both hits and
+    misses. Descriptive only; not evidence of real-data performance.
     """
 
     if layout.kind == "summary":

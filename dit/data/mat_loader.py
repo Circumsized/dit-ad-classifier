@@ -1,9 +1,8 @@
 """Readers for AI4AD MATLAB files.
 
-AI4AD files have appeared in multiple layouts: a structured array with one
-record per tract, a MATLAB cell array, and pre-flattened numeric tensors.  The
-loader accepts these layouts and converts them to one explicit representation:
-``[subject, tract, point, metric]``.
+AI4AD files appear in several layouts: a structured array with one record per
+tract, a MATLAB cell array, and pre-flattened numeric tensors. The loader
+accepts these and converts them to ``[subject, tract, point, metric]``.
 """
 
 from __future__ import annotations
@@ -33,12 +32,12 @@ def load_ai4ad_mat(
         Path to ``MCAD_AFQ_competition.mat``, ``MCAD_AFQ_test.mat`` or a
         compatible export.
     split:
-        ``auto``, ``train`` or ``test``.  ``auto`` prefers ``train_set`` when
-        the file has one and otherwise falls back to ``test_set``; it does not
-        switch based on whether labels are present, because silently reading the
-        wrong half of a file is worse than reading the one that exists.
+        ``auto``, ``train`` or ``test``. ``auto`` prefers ``train_set`` when
+        the file has one and otherwise falls back to ``test_set``. It does not
+        switch based on whether labels are present, so it cannot end up reading
+        a different half of the file than requested.
     metrics:
-        Optional metric names to retain.  Names are case-insensitive.
+        Optional metric names to retain. Names are case-insensitive.
     """
 
     source = Path(path)
@@ -148,8 +147,8 @@ def _parse_labels(value: Any) -> np.ndarray:
     labels = labels.reshape(-1)
     if not np.issubdtype(labels.dtype, np.number):
         raise ValueError("diagnosis labels must be numeric")
-    # Reject before the cast: astype(int) would silently truncate 1.5 into a
-    # different, valid label, and canonicalize_labels never sees the corruption.
+    # Reject before the cast: astype(int) would truncate 1.5 into a different
+    # but valid label that canonicalize_labels cannot detect.
     if not np.all(np.equal(labels, np.floor(labels))):
         raise ValueError("diagnosis labels must be integer-valued")
     return labels.astype(np.int64)

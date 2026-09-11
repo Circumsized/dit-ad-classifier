@@ -1,11 +1,10 @@
 """Column addressing for AFQ feature matrices.
 
-Classification needs a matrix; interpretability needs to know *which fiber,
-which node, which metric* each column is.  ``build_feature_matrix`` returns the
-matrix, and ``describe_layout`` returns the bookkeeping that lets importance
-scores be reported as "left uncinate fasciculus, node 82, MD" instead of
-"feature 12044".  Block-level selection and the tract x node heatmaps both
-depend on this mapping, so it lives next to the feature builders rather than
+``build_feature_matrix`` returns the matrix; ``describe_layout`` returns the
+bookkeeping that maps each column back to a (fiber, node, metric) triple, so
+importance scores can be reported as "left uncinate fasciculus, node 82, MD"
+instead of "feature 12044". Block-level selection and the tract x node heatmaps
+both use this mapping, so it lives next to the feature builders rather than
 inside either consumer.
 """
 
@@ -164,8 +163,8 @@ class FeatureLayout:
     def anatomical_blocks(self) -> list[Block]:
         """Blocks covering tract measurements only.
 
-        Selection ranks these; the missing-pattern and covariate blocks are
-        appended by the builders after them and are never pruned.
+        Selection ranks these. The missing-pattern and covariate blocks are
+        appended by the builders after them and are not pruned.
         """
 
         return [

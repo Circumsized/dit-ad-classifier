@@ -23,9 +23,8 @@ def stratified_kfold_indices(
     if n_splits < 2:
         raise ValueError("n_splits must be >= 2")
 
-    # A fold missing a class cannot be stratified, and silently yielding it
-    # would produce an accuracy that is not comparable to the other folds.
-    # Raise instead of shipping an uninterpretable number.
+    # A fold missing a class cannot be stratified, and its accuracy would not
+    # be comparable to the other folds.
     counts = np.bincount(labels, minlength=int(labels.max()) + 1)
     smallest = int(np.min(counts[counts > 0])) if counts.any() else 0
     if n_splits > smallest:

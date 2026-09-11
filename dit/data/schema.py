@@ -1,12 +1,12 @@
 """Explicit data contracts for AI4AD/AFQ features.
 
-The original course scripts infer shapes and labels from filenames and array
-positions.  This module makes those assumptions explicit and validates them at
-the boundary of the project.
+Shapes and label encodings are declared here and validated at the project
+boundary, rather than inferred from filenames and array positions.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
@@ -20,9 +20,9 @@ CANONICAL_NAMES: Mapping[int, str] = {0: "NC", 1: "MCI", 2: "AD"}
 def canonicalize_labels(labels: Iterable[int]) -> tuple[np.ndarray, dict[int, int]]:
     """Convert official 1/2/3 labels to contiguous 0/1/2 labels.
 
-    The function accepts already-canonical labels only when they are a subset
-    of ``{0, 1, 2}`` and no official label is present.  A mapping is returned
-    so prediction reports can retain the original coding.
+    Already-canonical labels are accepted only when they are a subset of
+    ``{0, 1, 2}`` and no official label is present. The returned mapping lets
+    prediction reports restore the original coding.
     """
 
     values = np.asarray(list(labels) if not isinstance(labels, np.ndarray) else labels)
@@ -31,8 +31,8 @@ def canonicalize_labels(labels: Iterable[int]) -> tuple[np.ndarray, dict[int, in
         raise ValueError("labels cannot be empty")
     if not np.all(np.isfinite(values)):
         raise ValueError("labels contain NaN or infinite values")
-    # A medical label of 1.5 is corrupt data, not a number to round: truncating
-    # it would silently turn it into a different, valid label.
+    # A label of 1.5 is corrupt data: rounding it would produce a different
+    # but valid label.
     if not np.all(np.equal(values, np.floor(values))):
         raise ValueError("labels must be integer-valued")
     values = values.astype(int)
@@ -42,9 +42,9 @@ def canonicalize_labels(labels: Iterable[int]) -> tuple[np.ndarray, dict[int, in
             f"unsupported labels {unique}; expected official 1/2/3 "
             "or canonical 0/1/2"
         )
-    # Contiguous renumbering so callers never have to reason about gaps.  The
-    # returned mapping lets a report restore the original coding, and
-    # :class:`DatasetBundle` carries the class names separately because a
+    # Contiguous renumbering, so callers do not have to handle gaps. The
+    # returned mapping restores the original coding, and
+    # :class:`DatasetBundle` carries class names separately because a
     # two-class subset renumbers the disease class.
     mapping = {raw: index for index, raw in enumerate(unique)}
     return np.asarray([mapping[int(value)] for value in values], dtype=np.int64), mapping
@@ -59,22 +59,21 @@ class DatasetBundle:
     X:
         Float array with shape ``[subjects, tracts, points, metrics]``.
     y:
-        Canonical integer labels ``0=NC, 1=MCI, 2=AD``.  It may be ``None``
-        for the private competition test set.
+        Canonical integer labels ``0=NC, 1=MCI, 2=AD``. May be ``None`` for
+        the private competition test set.
     age, sex, site:
-        Subject-level metadata.  Missing metadata is represented by NaN for
-        numeric values and ``-1`` for sites.
+        Subject-level metadata. Missing metadata is NaN for numeric values and
+        ``-1`` for sites.
     mask:
-        Boolean validity mask with the same shape as ``X``.  It is retained so
-        models can distinguish missing measurements from true zero values.
+        Boolean validity mask with the same shape as ``X``, so models can
+        distinguish missing measurements from true zero values.
     raw_label_map:
         Mapping from labels found in the source file to canonical labels.
     class_labels:
-        Explicit name per canonical label present in this view.  When omitted
-        the names come from :data:`CANONICAL_NAMES`, which is only correct for
-        the untouched three-class view: a binary view renumbers the labels, so
-        ``class 1`` means AD rather than MCI and must be named explicitly or a
-        report would mislabel the disease class.
+        Explicit name per canonical label present in this view. When omitted,
+        names come from :data:`CANONICAL_NAMES`, which is correct only for the
+        three-class view: a binary view renumbers the labels, so ``class 1``
+        means AD rather than MCI and must be named explicitly.
     """
 
     X: np.ndarray
@@ -204,9 +203,9 @@ class DatasetBundle:
     def task_view(self, task: str = "binary") -> "DatasetBundle":
         """Create an explicit binary or three-class view.
 
-        Classes are resolved by name, not by hardcoded index.  A bundle built
-        from a two-class source has NC at 0 and AD at 1, so a fixed
-        ``y == 2`` test would silently drop every AD subject.
+        Classes are resolved by name rather than by index. A bundle built from
+        a two-class source has NC at 0 and AD at 1, so a fixed ``y == 2`` test
+        would drop every AD subject.
         """
 
         if self.y is None:
@@ -247,6 +246,35 @@ class DatasetBundle:
             if label_name == name:
                 return int(label)
         return None
+
+    @property
+    def data_digest(self) -> str:
+        """Order-sensitive, non-PHI SHA-256 over this view's arrays.
+
+        Identifies the exact data snapshot a result was produced on: same
+        shape with different values, or the same rows in a different order,
+        produce different digests. Fold manifests carry it so paired
+        comparisons can reject results that came from different snapshots.
+        Computed once and cached; hashing ~50 MB takes well under a second.
+        """
+
+        cached = self.__dict__.get("_data_digest")
+        if cached is not None:
+            return str(cached)
+        digest = hashlib.sha256()
+        digest.update(np.ascontiguousarray(self.X, dtype=np.float32).tobytes())
+        for name in ("y", "site", "age", "sex"):
+            value = getattr(self, name)
+            if value is None:
+                digest.update(b"\x00|none")
+            else:
+                digest.update(np.ascontiguousarray(value).tobytes())
+        digest.update(np.ascontiguousarray(self.mask, dtype=bool).tobytes())
+        digest.update("|".join(self.tract_names).encode("utf-8"))
+        digest.update("|".join(self.metric_names).encode("utf-8"))
+        value = digest.hexdigest()
+        object.__setattr__(self, "_data_digest", value)
+        return value
 
     def summary(self) -> dict[str, object]:
         """Return JSON-friendly schema and label counts."""

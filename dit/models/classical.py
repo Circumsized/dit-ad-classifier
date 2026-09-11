@@ -6,10 +6,41 @@ from typing import Any
 
 import numpy as np
 
+from dit.data.covariates import ResidualizeCovariates, covariate_matrix
 from dit.data.layout import FeatureLayout, view_for_layout
 from dit.data.preprocessing import smooth_profiles
 from dit.data.schema import DatasetBundle
 from dit.data.sklearn_compat import l1_ratio_kwargs
+
+# Negative-control inputs: each answers "what does the model learn from
+# demographics alone / missingness alone?" and is run through the same
+# folds, metrics and threshold machinery as the imaging views.
+CONTROL_VIEWS = ("demographics", "missingness")
+
+
+def build_control_matrix(dataset: DatasetBundle, kind: str) -> tuple[np.ndarray, list[str]]:
+    """Build a negative-control input matrix and its column names.
+
+    ``demographics``  the [age, sex] matrix alone, missing values as NaN.
+    ``missingness``   one column per tract: the fraction of nodes AFQ failed
+                      to identify. If a model scores as well on this as on
+                      imaging, the signal is acquisition/quality artifacts,
+                      not biology.
+    """
+
+    normalized = str(kind).lower()
+    if normalized == "demographics":
+        matrix = covariate_matrix(dataset.age, dataset.sex, dataset.n_samples)
+        names = ["age", "sex"]
+    elif normalized == "missingness":
+        valid = dataset.mask if dataset.mask is not None else np.isfinite(dataset.X)
+        matrix = (~valid).any(axis=-1).astype(np.float64).mean(axis=-1)
+        names = [f"missing|{tract}" for tract in dataset.tract_names]
+    else:
+        raise ValueError(
+            f"unknown control view {kind!r}; use one of {CONTROL_VIEWS}"
+        )
+    return matrix.astype(np.float64, copy=False), names
 
 
 def build_feature_matrix(
@@ -24,16 +55,16 @@ def build_feature_matrix(
 
     ``profile`` keeps every along-tract node, laid out tract-major then metric
     so each (tract, metric) pair is a contiguous block of ``n_points``
-    columns.  Contiguity is what makes block selection and the tract x node
-    heatmaps addressable; see :func:`describe_feature_layout`.
+    columns. Contiguity makes block selection and the tract x node heatmaps
+    addressable; see :func:`describe_feature_layout`.
 
     ``summary`` emits mean, standard deviation, linear slope and trapezoidal
-    area per tract/metric.  A metric name such as ``FA`` selects one channel
+    area per tract/metric. A metric name such as ``FA`` selects one channel
     while retaining all tract nodes.
 
     ``include_missing_pattern`` appends the per-tract fraction of nodes AFQ
-    failed to identify.  Tract identification failure is informative, so it is
-    appended after the profile columns to avoid disturbing the block accounting.
+    failed to identify, after the profile columns so the block accounting is
+    unchanged.
     """
 
     values = smooth_profiles(dataset.X, smooth_window)
@@ -71,7 +102,7 @@ def describe_feature_layout(
     """Return the column map matching :func:`build_feature_matrix`.
 
     Derived from the same view string and dataset metadata as the matrix, so a
-    mismatch raises instead of silently mislabeling features.
+    mismatch raises instead of mislabeling features.
     """
 
     return view_for_layout(
@@ -99,13 +130,26 @@ def make_search_estimator(
     scoring: str = "balanced_accuracy",
     n_jobs: int = 1,
     selector: Any | None = None,
+    residualize: bool = False,
 ):
     """Create a tuned sklearn pipeline with split-local preprocessing.
 
-    When ``selector`` is given it is inserted as the first pipeline step so it
-    is fit inside every inner cross-validation fold, not once on the whole outer
-    training fold.  That keeps hyperparameter selection honest: inner-validation
-    labels never influence the features the search scores on.
+    When ``selector`` is given it is inserted as the first pipeline step, so it
+    is fit inside every inner cross-validation fold rather than once on the
+    whole outer training fold. Inner-validation labels then stay out of the
+    features the search scores on.
+
+    ``residualize`` prepends :class:`ResidualizeCovariates`, which reads age
+    and sex from the matrix's trailing columns and regresses them out. Inside
+    the pipeline, the regression is refit on every inner training fold — the
+    covariates of inner-validation rows never touch the coefficients.
+
+    For SVMs on sklearn >= 1.9 the probability calibrator wraps the *entire*
+    preprocessing pipeline, not just the estimator: the Platt scalars are then
+    fit on folds where imputation, scaling and selection are refit as well, so
+    a supervised selector cannot leak its fold's labels into the calibration
+    rows. Grid keys address the inner estimator as
+    ``model__estimator__model__<param>``.
     """
 
     try:
@@ -123,23 +167,23 @@ def make_search_estimator(
         ) from exc
 
     name = model_name.lower().replace("-", "_")
+    calibrated_svm = False
     if name in {"linear_svm", "svm", "official_svm"}:
-        estimator, prefix = _probability_svc("linear", seed)
-        parameters = {f"model__{prefix}C": np.logspace(-4, 0, 9)}
+        kernel = "linear"
+        parameters = None
+        calibrated_svm = True
     elif name in {"rbf_svm", "rbf"}:
-        estimator, prefix = _probability_svc("rbf", seed)
-        parameters = {
-            f"model__{prefix}C": np.logspace(-2, 2, 5),
-            f"model__{prefix}gamma": ["scale", 1e-3, 1e-2],
-        }
+        kernel = "rbf"
+        parameters = None
+        calibrated_svm = True
     elif name in {"logistic", "elastic_net", "lr"}:
         # ``_l1_ratio_kwargs`` already carries the solver it needs.
         estimator = LogisticRegression(
             **_l1_ratio_kwargs(0.5, "saga"),
             class_weight="balanced",
             # SAGA with an elastic net stalls well short of 5 000 iterations on
-            # the 7 200-column profile view, so it returned coefficients from an
-            # unconverged solution and reported them as if they were fitted.
+            # the 7 200-column profile view and returns coefficients from an
+            # unconverged solution.
             max_iter=20000,
             random_state=seed,
         )
@@ -166,14 +210,73 @@ def make_search_estimator(
     else:
         raise ValueError(f"unknown classical model: {model_name}")
 
-    steps = [
-        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
-        ("scaler", StandardScaler()),
-        ("model", estimator),
-    ]
+    # ``keep_empty_features`` preserves the column count when a fold contains
+    # an all-NaN feature: dropping it would shift every later coefficient away
+    # from its anatomical column and mislabel interpretation output.
+    preprocessing: list[tuple[str, Any]] = []
+    if residualize:
+        preprocessing.append(("residualizer", ResidualizeCovariates()))
     if selector is not None:
-        steps.insert(0, ("selector", selector))
-    pipeline = Pipeline(steps)
+        preprocessing.append(("selector", selector))
+    preprocessing.append(
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True, keep_empty_features=True))
+    )
+    preprocessing.append(("scaler", StandardScaler()))
+
+    if calibrated_svm:
+        from sklearn import __version__ as sklearn_version
+
+        parts = tuple(int(part) for part in sklearn_version.split(".")[:2])
+        svc = SVC(kernel=kernel, class_weight="balanced", random_state=seed)
+        if parts < (1, 9):
+            # Older sklearn has no calibration wrapper API: Platt scaling is
+            # solved jointly with the margin inside SVC(probability=True).
+            # Its internal cross-fit cannot refit preprocessing either; the
+            # maintained path is the >= 1.9 branch above.
+            pipeline = Pipeline(
+                preprocessing
+                + [
+                    (
+                        "model",
+                        SVC(
+                            kernel=kernel,
+                            probability=True,
+                            class_weight="balanced",
+                            random_state=seed,
+                        ),
+                    )
+                ]
+            )
+            prefix = "model__"
+        else:
+            from sklearn.calibration import CalibratedClassifierCV
+
+            inner = Pipeline(preprocessing + [("model", svc)])
+            wrapper = Pipeline(
+                [
+                    (
+                        "model",
+                        CalibratedClassifierCV(
+                            inner,
+                            cv=3,
+                            ensemble=False,
+                            method="sigmoid",
+                        ),
+                    )
+                ]
+            )
+            pipeline = wrapper
+            prefix = "model__estimator__model__"
+        if name in {"linear_svm", "svm", "official_svm"}:
+            parameters = {f"{prefix}C": np.logspace(-4, 0, 9)}
+        else:
+            parameters = {
+                f"{prefix}C": np.logspace(-2, 2, 5),
+                f"{prefix}gamma": ["scale", 1e-3, 1e-2],
+            }
+    else:
+        pipeline = Pipeline(preprocessing + [("model", estimator)])
+
     return GridSearchCV(
         pipeline,
         parameters,
@@ -186,12 +289,60 @@ def make_search_estimator(
     )
 
 
-def align_probabilities(probabilities: np.ndarray, model_classes, n_classes: int) -> np.ndarray:
-    """Place estimator probabilities into canonical class columns."""
+def fitted_pipeline_step(search: Any, step_name: str) -> Any | None:
+    """Locate a named step inside a fitted search's best pipeline.
 
+    The calibrated-SVM layout nests the working pipeline one level deeper, so
+    consumers ask here instead of hard-coding a ``named_steps`` path that only
+    matches one estimator family. On sklearn >= 1.9 the wrapper's ``.estimator``
+    attribute is the unfitted template; the pipeline fitted on the full outer
+    training fold lives in ``calibrated_classifiers_[0].estimator``.
+    """
+
+    estimator = search.best_estimator_
+    named = getattr(estimator, "named_steps", {})
+    if step_name in named:
+        return named[step_name]
+    model = named.get("model")
+    calibrated = getattr(model, "calibrated_classifiers_", None)
+    if calibrated:
+        inner_candidates = [getattr(entry, "estimator", None) for entry in calibrated]
+    else:
+        inner_candidates = [getattr(model, "estimator", None)]
+    for inner in inner_candidates:
+        inner_named = getattr(inner, "named_steps", {})
+        if step_name in inner_named:
+            return inner_named[step_name]
+    return None
+
+
+def align_probabilities(probabilities: np.ndarray, model_classes, n_classes: int) -> np.ndarray:
+    """Place estimator probabilities into canonical class columns.
+
+    Fails closed when the estimator's class set does not cover the task: a
+    zero-filled column would silently present "the model never saw this
+    class" as a calibrated probability of 0 and let argmax pick a winner on
+    noise.
+    """
+
+    labels = [int(label) for label in np.asarray(model_classes, dtype=int)]
+    seen = set(labels)
+    if len(seen) != len(labels):
+        raise ValueError("model reports a duplicated class")
+    outside = sorted(seen - set(range(n_classes)))
+    if outside:
+        raise ValueError(
+            f"model reports classes {outside} outside the task range 0..{n_classes - 1}"
+        )
+    missing = sorted(set(range(n_classes)) - seen)
+    if missing:
+        raise ValueError(
+            f"training fold never saw class(es) {missing}; padding their "
+            "probabilities with zeros would hide that they cannot be scored"
+        )
     output = np.zeros((probabilities.shape[0], n_classes), dtype=float)
-    for source, label in enumerate(np.asarray(model_classes, dtype=int)):
-        output[:, int(label)] = probabilities[:, source]
+    for source, label in enumerate(labels):
+        output[:, label] = probabilities[:, source]
     return output
 
 
@@ -205,56 +356,13 @@ def _l1_ratio_kwargs(l1_ratio: float, solver: str) -> dict:
     return l1_ratio_kwargs(l1_ratio, solver)
 
 
-def _probability_svc(
-    kernel: str, seed: int, calibration_folds: int = 3
-) -> tuple[object, str]:
-    """Return an SVC exposing ``predict_proba``, plus its grid parameter prefix.
-
-    ``SVC(probability=True)`` was deprecated in sklearn 1.9 in favour of an
-    explicit calibration wrapper, which is also the more honest construction:
-    the Platt scalars are fitted on calibration folds instead of being solved
-    jointly with the margin.  ``ensemble=False`` keeps a single model, so the
-    reported decisions stay those of the plain SVM.
-
-    The wrapper nests the SVM, so grid keys must address it as
-    ``model__estimator__C`` rather than ``model__C``.  The prefix is returned
-    with the estimator so the grid is built for whichever form was chosen.
-    """
-
-    from sklearn import __version__ as sklearn_version
-    from sklearn.svm import SVC
-
-    parts = tuple(int(part) for part in sklearn_version.split(".")[:2])
-    if parts < (1, 9):
-        return (
-            SVC(
-                kernel=kernel,
-                probability=True,
-                class_weight="balanced",
-                random_state=seed,
-            ),
-            "",
-        )
-    from sklearn.calibration import CalibratedClassifierCV
-
-    return (
-        CalibratedClassifierCV(
-            SVC(kernel=kernel, class_weight="balanced", random_state=seed),
-            cv=max(calibration_folds, 2),
-            ensemble=False,
-            method="sigmoid",
-        ),
-        "estimator__",
-    )
-
-
 def _profile_summary(values: np.ndarray) -> np.ndarray:
     """Per-tract/metric mean, standard deviation, linear slope and area.
 
     ``np.trapz`` is not NaN-aware: a single missing node makes the whole area
-    NaN, which turns a 1% missing rate into a 16% missing feature rate and
-    quietly removes a quarter of the columns from every model.  Slope and area
-    are therefore computed over the measured nodes only.
+    NaN, turning a 1% missing rate into a 16% missing feature rate and dropping
+    a quarter of the columns. Slope and area are computed over the measured
+    nodes only.
     """
 
     safe = np.where(np.isfinite(values), values, np.nan)
@@ -298,7 +406,7 @@ def _nan_area(values: np.ndarray, x: np.ndarray) -> np.ndarray:
 
     Missing nodes break the curve into segments; each segment contributes the
     area of the measured span rather than being stretched across the full
-    range, so a partially measured tract is not silently rescaled upward.
+    range, so a partially measured tract is not rescaled upward.
     """
 
     left = values[..., :-1, :]
@@ -306,5 +414,5 @@ def _nan_area(values: np.ndarray, x: np.ndarray) -> np.ndarray:
     both = np.isfinite(left) & np.isfinite(right)
     steps = np.where(both, 0.5 * (left + right), 0.0) * np.diff(x)[None, None, :, None]
     area = steps.sum(axis=2)
-    # A profile with no measurable span is unknown, not zero.
+    # A profile with no measurable span is unknown rather than zero.
     return np.where(both.any(axis=2), area, np.nan)

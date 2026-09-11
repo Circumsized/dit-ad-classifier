@@ -1,10 +1,9 @@
 """Training loop for the tract Transformer with optional domain alignment.
 
-The network in :mod:`dit.models.tract_transformer` and the alignment primitives
-in :mod:`dit.models.domain_adaptation` are each shape-correct in isolation;
-this module is what puts them into a loop that respects the same leakage
-rules as the classical path: every normalisation statistic and every early-
-stopping decision is made on outer-fold training rows only.
+Combines the network in :mod:`dit.models.tract_transformer` with the alignment
+primitives in :mod:`dit.models.domain_adaptation` under the same leakage rules
+as the classical path: every normalisation statistic and every early-stopping
+decision is made on outer-fold training rows only.
 """
 
 from __future__ import annotations
@@ -40,10 +39,12 @@ __all__ = [
 ]
 
 # Two settings only: this loop is expensive, and a wider grid multiplies the
-# outer-fold cost by the grid size.
+# outer-fold cost by the grid size. The search varies the learning rate only;
+# ``epochs`` is a hard budget owned by the caller's config, so the epochs a
+# report claims are the epochs that actually ran instead of a hidden grid value.
 _SEARCH_GRID: tuple[dict[str, Any], ...] = (
-    {"epochs": 40, "learning_rate": 2e-3},
-    {"epochs": 90, "learning_rate": 1e-3},
+    {"learning_rate": 2e-3},
+    {"learning_rate": 1e-3},
 )
 
 
@@ -78,7 +79,7 @@ class DomainTrainConfig:
             raise ValueError(f"unknown calibration {self.calibration!r}; use one of {CALIBRATIONS}")
         if self.d_model % self.n_heads:
             raise ValueError("d_model must be divisible by n_heads")
-        # 0.0 disables the hold-out, which is what the tuning pass inside
+        # 0.0 disables the hold-out, which the tuning pass inside
         # :func:`search_domain_classifier` needs: it supplies its own outer
         # validation slice, so a second nested split would starve the fit.
         if not 0 <= self.validation_fraction < 0.5:
@@ -120,11 +121,10 @@ def _alignment_loss(
 ) -> tuple[torch.Tensor, bool]:
     """Mean alignment penalty across the sites present in the batch.
 
-    Returns ``(loss, used)``; ``used`` is False when fewer than two sites have
-    two or more members each, in which case there is nothing to align and the
-    loss must stay zero rather than backpropagate a gradient from a degenerate
-    statistic.  Rows whose site is unknown (a negative group id) are dropped
-    before anything is computed, so they never enter an alignment term.
+    Returns ``(loss, used)``. ``used`` is False when fewer than two sites have
+    two or more members each; the loss stays zero because the alignment
+    statistic would be degenerate. Rows with a negative group id are excluded
+    from the alignment term.
     """
 
     group_array = np.asarray(groups)
@@ -150,8 +150,8 @@ def _alignment_loss(
         if discriminator is None:
             raise RuntimeError("dann alignment requires a discriminator")
         # One multi-class pass over every known-site row, using its actual site
-        # id as the target, so sites beyond the first two are genuine positive
-        # classes rather than an unused discriminator head.
+        # id as the target, so sites beyond the first two are positive classes
+        # rather than an unused discriminator head.
         selected = features.index_select(0, known_index)
         target = torch.as_tensor(
             [int(group_array[position]) for position in known_positions],
@@ -182,10 +182,9 @@ def _alignment_loss(
 class DomainAlignedClassifier:
     """Fits a :class:`TractTransformer` and reports class probabilities.
 
-    ``fit`` consumes raw ``[N, T, P, M]`` profiles, which is why this class
-    sits beside rather than inside the sklearn search: the classical path
-    flattens profiles into a table first, and that flattening is not
-    reversible.
+    ``fit`` consumes raw ``[N, T, P, M]`` profiles, so this class sits beside
+    rather than inside the sklearn search: the classical path flattens profiles
+    into a table first, and that flattening is not reversible.
     """
 
     def __init__(self, config: DomainTrainConfig | None = None, device: str = "cpu") -> None:
@@ -207,6 +206,7 @@ class DomainAlignedClassifier:
         self.temperature_saturated_: bool = False
         self.platt_: list[Any] | None = None
         self.calibration_applied_: bool = False
+        self.class_weights_: list[float] | None = None
 
     def fit(
         self,
@@ -216,9 +216,9 @@ class DomainAlignedClassifier:
         covariates: np.ndarray | None = None,
         site: np.ndarray | None = None,
     ) -> "DomainAlignedClassifier":
-        # Re-seeding inside fit, not at construction time, is what makes a
-        # report reproducible: every outer fold re-enters the constructor with
-        # a fresh random state.
+        # Re-seed inside fit rather than at construction time, so every outer
+        # fold re-enters the constructor with a fresh random state and the
+        # report is reproducible.
         np.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
         profiles = np.asarray(profiles, dtype=np.float32)
@@ -267,7 +267,7 @@ class DomainAlignedClassifier:
         n_domains = int(groups.max() + 1) if grouped else 0
         # The features handed to the alignment loss are the classifier's
         # read-out, which grows when covariates are concatenated, so the
-        # discriminator must match that width and not the bare d_model.
+        # discriminator width must match that rather than the bare d_model.
         feature_dim = self.config.d_model + (16 if include_covariates else 0)
         self.discriminator = (
             DomainDiscriminator(feature_dim, n_domains).to(self.device) if grouped else None
@@ -276,10 +276,8 @@ class DomainAlignedClassifier:
         train_local, validation_local, calibration_local = self._split_indices(labels)
         no_holdout = validation_local.size == 0
 
-        # The centring is fit on the training slice only.  The held-out rows
-        # never reach the loss, and letting them shape the normalisation would
-        # contradict that -- a calibration slice must be held out of the whole
-        # fit, not just of the gradient.
+        # Fit centring on the training slice. Validation rows stay outside the
+        # classifier loss, and calibration rows stay outside the entire fit.
         training_profiles = profiles[train_local]
         column_mean = np.nanmean(training_profiles, axis=0)
         column_scale = np.nanstd(training_profiles, axis=0)
@@ -289,9 +287,8 @@ class DomainAlignedClassifier:
         normalised = np.where(finite, (profiles - self.center_) / self.scale_, 0.0).astype(
             np.float32
         )
-
         # Impute covariate NaNs with training-row medians so no NaN reaches the
-        # network; a real cohort has missing age/sex for some subjects.  The
+        # network; a real cohort has missing age/sex for some subjects. The
         # medians come from the training slice only and are stored so
         # ``predict_proba`` fills held-out rows identically; a wholly missing
         # column falls back to zero.
@@ -312,8 +309,17 @@ class DomainAlignedClassifier:
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
+        # Inverse-frequency weights from the *training rows only*: the
+        # validation and calibration slices are held out, so their labels must
+        # not shape the loss — otherwise changing a held-out label would change
+        # how the model trains on data it never sees.
         weights = (
-            _class_weights(labels, n_classes, self.device) if self.config.class_weights else None
+            _class_weights(labels[train_local], n_classes, self.device)
+            if self.config.class_weights
+            else None
+        )
+        self.class_weights_ = (
+            None if weights is None else weights.detach().cpu().numpy().tolist()
         )
 
         history: dict[str, list[float]] = {"validation": []}
@@ -335,13 +341,14 @@ class DomainAlignedClassifier:
                 index = order[start : start + self.config.batch_size]
                 logits = self.model(
                     torch.as_tensor(normalised[index], device=self.device),
+                    valid_mask=torch.as_tensor(finite[index], device=self.device),
                     covariates=torch.as_tensor(covariates[index], device=self.device),
                 )
                 target = torch.as_tensor(labels[index], device=self.device, dtype=torch.long)
                 loss = nn.functional.cross_entropy(logits, target, weight=weights)
                 # Gradients accumulate across the batches below so the alignment
-                # term, which needs to see several sites at once, can be added
-                # before a single step.
+                # term, which needs several sites at once, can be added before a
+                # single step.
                 loss.backward()
                 epoch_loss += float(loss)
                 batches += 1
@@ -357,6 +364,7 @@ class DomainAlignedClassifier:
                 if window.shape[0] >= 2:
                     _, features = self.model(
                         torch.as_tensor(normalised[window], device=self.device),
+                        valid_mask=torch.as_tensor(finite[window], device=self.device),
                         covariates=torch.as_tensor(covariates[window], device=self.device),
                         return_features=True,
                     )
@@ -384,6 +392,7 @@ class DomainAlignedClassifier:
             with torch.no_grad():
                 validation_logits = self.model(
                     torch.as_tensor(normalised[validation_local], device=self.device),
+                    valid_mask=torch.as_tensor(finite[validation_local], device=self.device),
                     covariates=torch.as_tensor(covariates[validation_local], device=self.device),
                 )
             score = _balanced_accuracy(
@@ -406,11 +415,21 @@ class DomainAlignedClassifier:
         self.classes_ = classes
         self.history_ = history
         self.best_validation_score_ = None if no_holdout else float(best_score)
-        self._fit_calibration(labels, normalised, covariates, calibration_local)
+        self._fit_calibration(labels, normalised, covariates, finite, calibration_local)
         return self
 
-    def _forward_logits(self, normalised: np.ndarray, covariates: np.ndarray) -> np.ndarray:
-        """Raw class logits for every row, in evaluation mode."""
+    def _forward_logits(
+        self,
+        normalised: np.ndarray,
+        covariates: np.ndarray,
+        finite: np.ndarray,
+    ) -> np.ndarray:
+        """Raw class logits for every row, in evaluation mode.
+
+        ``finite`` is the missing-value mask of the *raw* profiles these rows
+        came from: normalisation replaces NaN with 0, so the mask cannot be
+        recovered downstream and must travel with the data.
+        """
 
         if self.model is None:
             raise RuntimeError("classifier must be fit before scoring")
@@ -420,6 +439,7 @@ class DomainAlignedClassifier:
                 index = slice(start, min(start + self.config.batch_size, normalised.shape[0]))
                 logits[index] = self.model(
                     torch.as_tensor(normalised[index], device=self.device),
+                    valid_mask=torch.as_tensor(finite[index], device=self.device),
                     covariates=torch.as_tensor(covariates[index], device=self.device),
                 ).cpu().numpy()
         return logits
@@ -429,15 +449,14 @@ class DomainAlignedClassifier:
         labels: np.ndarray,
         normalised: np.ndarray,
         covariates: np.ndarray,
+        finite: np.ndarray,
         calibration_rows: np.ndarray,
     ) -> None:
         """Fit the probability map on rows outside training and early stopping.
 
-        The rows are cut from the same hold-out that drives early stopping, so
-        nothing here has reached the classifier's loss.  Asking for calibration
-        without a slice to calibrate on is an error rather than a silent no-op:
-        reporting a miscalibrated probability and labelling it calibrated is the
-        failure this module exists to prevent.
+        These rows come from the holdout that drives early stopping and do not
+        enter the classifier loss. Calibration requires a non-empty slice; an
+        empty slice raises instead of reporting an unfitted map as calibrated.
         """
 
         self.temperature_ = 1.0
@@ -452,7 +471,11 @@ class DomainAlignedClassifier:
                 "rows; increase validation_fraction"
             )
 
-        logits = self._forward_logits(normalised[calibration_rows], covariates[calibration_rows])
+        logits = self._forward_logits(
+            normalised[calibration_rows],
+            covariates[calibration_rows],
+            finite[calibration_rows],
+        )
         targets = labels[calibration_rows]
         if self.config.calibration == "temperature":
             self.temperature_ = temperature_scale(logits, targets)
@@ -473,8 +496,9 @@ class DomainAlignedClassifier:
         profiles = np.asarray(profiles, dtype=np.float32)
         if profiles.ndim != 4:
             raise ValueError(f"profiles must be [N,T,P,M], got {profiles.shape}")
+        finite = np.isfinite(profiles)
         normalised = np.where(
-            np.isfinite(profiles),
+            finite,
             (profiles - self.center_) / self.scale_,
             0.0,
         ).astype(np.float32)
@@ -485,7 +509,7 @@ class DomainAlignedClassifier:
             covariates = np.where(
                 np.isfinite(covariates), covariates, self.covariate_median_
             ).astype(np.float32)
-        logits = self._forward_logits(normalised, covariates)
+        logits = self._forward_logits(normalised, covariates, finite)
         if self.calibration_applied_ and self.config.calibration == "temperature":
             logits = logits / self.temperature_
         probabilities = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
@@ -502,6 +526,7 @@ class DomainAlignedClassifier:
             "alignment_active": bool(self.alignment_active_),
             # Counted from the training series rather than the validation
             # series: with no hold-out there is no validation entry at all.
+            "epochs_requested": int(self.config.epochs),
             "epochs_run": len(self.history_.get("training", [])),
             "best_validation_score": None
             if getattr(self, "best_validation_score_", None) is None
@@ -513,6 +538,7 @@ class DomainAlignedClassifier:
             "learning_rate": self.config.learning_rate,
             "pooling": self.config.pooling,
             "class_weights": self.config.class_weights,
+            "class_weights_values": self.class_weights_,
             "calibration": self.config.calibration,
             "calibration_applied": bool(self.calibration_applied_),
             "temperature": float(self.temperature_),
@@ -531,9 +557,13 @@ class DomainAlignedClassifier:
         wrong way.  A fraction of zero returns every row to training and empty
         hold-outs, which is what the tuning pass needs.
 
-        The hold-out is divided in half when calibration is requested, because
-        a calibrator fitted on the same rows that chose the stopping point is
-        fitting on its own answer key.
+        The hold-out is divided *per class* when calibration is requested,
+        because a calibrator fitted on the same rows that chose the stopping
+        point is fitting on its own answer key.  A class-level cut is what
+        keeps both halves usable: splitting the class-ordered hold-out list in
+        half by position can leave an entire class on one side, and a
+        calibrator or early-stopping score that never sees that class is not
+        fitting or selecting anything meaningful.
         """
 
         if self.config.validation_fraction == 0:
@@ -544,8 +574,9 @@ class DomainAlignedClassifier:
         if self.config.calibration == "none":
             validation_rows, calibration_rows = held_out, np.arange(0, dtype=int)
         else:
-            split = len(held_out) // 2
-            validation_rows, calibration_rows = held_out[:split], held_out[split:]
+            validation_rows, calibration_rows = _stratified_halves(
+                held_out, labels, self.config.seed + 3
+            )
         validation = np.asarray(validation_rows, dtype=int)
         calibration = np.asarray(calibration_rows, dtype=int)
         if train.size < 2 or validation.size < 1:
@@ -575,6 +606,36 @@ def _stratified_holdout(
         held_out.extend(members[:cut].tolist())
         train_rows.extend(members[cut:].tolist())
     return np.asarray(train_rows, dtype=int), np.asarray(held_out, dtype=int)
+
+
+def _stratified_halves(
+    held_out: np.ndarray, labels: np.ndarray, seed: int
+) -> tuple[list[int], list[int]]:
+    """Divide a held-out slice into early-stop and calibration halves per class.
+
+    Every class with two or more held-out rows contributes at least one row to
+    each half; a class with a single held-out row cannot serve both roles, so
+    the fit fails with the remedy in the message instead of producing a
+    calibrator or stopping score that never saw that class.
+    """
+
+    generator = np.random.default_rng(seed)
+    held_out = np.asarray(held_out, dtype=int)
+    validation: list[int] = []
+    calibration: list[int] = []
+    for label in np.unique(labels[held_out]):
+        members = held_out[labels[held_out] == label]
+        generator.shuffle(members)
+        if members.size < 2:
+            raise ValueError(
+                f"class {int(label)} holds out only one row, which cannot serve "
+                "both early stopping and calibration; increase validation_fraction, "
+                "reduce the fold's class imbalance, or set calibration='none'"
+            )
+        half = members.size // 2
+        validation.extend(members[:half].tolist())
+        calibration.extend(members[half:].tolist())
+    return validation, calibration
 
 
 def _relabel(values: np.ndarray) -> np.ndarray:
@@ -659,6 +720,7 @@ def search_domain_classifier(
     return winner, {
         "best_params": best_overrides,
         "tuning_score": float(best_score),
+        "epochs_requested": int(base.epochs),
         "grid": [{"params": overrides, "score": float(score)} for score, overrides in candidates],
     }
 

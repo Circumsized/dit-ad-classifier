@@ -1,8 +1,8 @@
 """``dit`` command-line interface.
 
-Run everything from a YAML file, or pass the knobs explicitly.  The synthetic
-data path exists so the whole pipeline can be exercised and tested without the
-AI4AD ``.mat`` files, which are distributed separately by the data owners.
+Runs from a YAML file or from explicit flags. The synthetic data path
+exercises the whole pipeline without the AI4AD ``.mat`` files, which are
+distributed separately by the data owners.
 """
 
 from __future__ import annotations
@@ -19,6 +19,12 @@ from dit import __version__
 from dit.config import config_to_experiment, experiment_payload, load_config
 from dit.data.schema import DatasetBundle
 from dit.data.synthetic import make_synthetic_bundle
+from dit.deployment import (
+    fit_deployment_model,
+    load_deployment_artifact,
+    predict_unlabeled,
+    save_deployment_artifact,
+)
 from dit.evaluation.experiment import (
     DEFAULT_ENSEMBLE_MODELS,
     ENSEMBLE_WEIGHTINGS,
@@ -66,6 +72,12 @@ def _add_experiment_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--view", default="summary", help="summary, profile, or a metric name such as MD")
     parser.add_argument("--smooth-window", type=int, default=5)
     parser.add_argument("--covariate", choices=("none", "feature", "residualize"), default="feature")
+    parser.add_argument(
+        "--control-view",
+        choices=("demographics", "missingness"),
+        default=None,
+        help="negative-control input: demographics alone or missingness alone",
+    )
     parser.add_argument("--missing-pattern", action="store_true")
     parser.add_argument("--select", action="store_true", help="enable nested block/node selection")
     parser.add_argument("--top-blocks", type=int, default=None)
@@ -118,8 +130,8 @@ def _add_experiment_args(parser: argparse.ArgumentParser) -> None:
 
 def _load_dataset(args: argparse.Namespace) -> DatasetBundle:
     if getattr(args, "smoke", False):
-        # A small deterministic bundle so the whole pipeline can be exercised
-        # in seconds; the size is fixed so the smoke report is reproducible.
+        # Small deterministic bundle; the size is fixed so the smoke report
+        # stays reproducible.
         return make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=args.data_seed)
     if args.synthetic:
         return make_synthetic_bundle(
@@ -136,9 +148,8 @@ def _load_dataset(args: argparse.Namespace) -> DatasetBundle:
 
 
 def _config_from_args(args: argparse.Namespace) -> ExperimentConfig:
-    # ``--smoke`` is meant to run out of the box on a tiny bundle, so shrink the
-    # outer/inner fold counts to what 60 synthetic subjects can support, unless
-    # the user explicitly lowered them further.
+    # ``--smoke`` runs on a tiny bundle, so shrink the outer/inner fold counts
+    # to what 60 synthetic subjects support, unless the user set them lower.
     n_splits = args.n_splits
     inner_splits = args.inner_splits
     if getattr(args, "smoke", False):
@@ -173,6 +184,7 @@ def _config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             name.strip() for name in args.ensemble_models.split(",") if name.strip()
         ),
         ensemble_weighting=args.ensemble_weighting,
+        control_view=getattr(args, "control_view", None),
     )
 
 
@@ -208,9 +220,9 @@ def _bundle(
     per_site = None
     if view.site is not None and view.y is not None and int(np.min(view.site)) >= 0:
         try:
-            # Site composition and performance must describe the same task view.
-            # A binary view drops MCI, so using the full data here would make the
-            # composition and the reported predictions refer to different cohorts.
+            # Site composition and performance describe the same task view.
+            # A binary view drops MCI, so using the full data here would make
+            # the composition and the predictions refer to different cohorts.
             composition = site_composition(view.site, view.y, label_map=view.label_map)
             per_site = {
                 result.key: per_site_metrics(
@@ -281,9 +293,8 @@ def _write_rad_scores(
     """Write per-subject out-of-fold disease scores for external ranking.
 
     Every row is an out-of-fold prediction: the probability came from a model
-    that never trained on that subject.  This is deliberately separate from the
-    ``interpret`` command, which refits on all data and is not a performance
-    estimate.
+    that did not train on that subject. Separate from the ``interpret``
+    command, which refits on all data and is not a performance estimate.
     """
 
     view = dataset.task_view(config.task)
@@ -396,8 +407,8 @@ def cmd_ablation(args: argparse.Namespace) -> int:
         include_covariate_comparisons=True,
     )
     written = _write_all(args.out, payload, "ablation")
-    # Strict JSON so an out-of-range float becomes an error, not a bare NaN that
-    # downstream JSON parsers reject.
+    # Strict JSON so an out-of-range float raises instead of emitting a bare
+    # NaN that downstream parsers reject.
     written.append(write_json(Path(args.out) / "ablation_table.json", rows))
     written.append(_write_ablation_csv(args.out, rows))
     _write_markdown_table(args.out, rows, written)
@@ -460,8 +471,8 @@ def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], wr
 def cmd_interpret(args: argparse.Namespace) -> int:
     """Coefficient importance and tract x node heatmaps.
 
-    The model is refit on every labeled subject: this produces explanations,
-    not a performance estimate, so it is never used as an accuracy claim.
+    Refits on every labeled subject, so this produces explanations rather than
+    a performance estimate.
     """
 
     dataset = _load_dataset(args)
@@ -522,6 +533,86 @@ def cmd_interpret(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fit(args: argparse.Namespace) -> int:
+    """Fit the frozen configuration on every labeled row and save an artifact.
+
+    This is the deployment closure the evaluation path deliberately does not
+    provide: hyperparameters are re-tuned on all labeled rows for the final
+    model, so any score printed here is a selection score and the unbiased
+    numbers remain the cross-validation reports.
+    """
+
+    dataset = _load_dataset(args)
+    if args.config:
+        config = config_to_experiment(load_config(args.config))
+    else:
+        config = _config_from_args(args)
+    model = fit_deployment_model(dataset, config)
+    artifact = save_deployment_artifact(model, args.artifact)
+    best_params = {
+        key: (value.item() if isinstance(value, np.generic) else value)
+        for key, value in model.best_params.items()
+    }
+    print(json.dumps(
+        {
+            "artifact": str(artifact),
+            "model": config.model,
+            "task": config.task,
+            "best_params": best_params,
+            "classes": model.label_map,
+            "data_digest": model.data_digest,
+            "selection_metric": config.selection_metric,
+        },
+        indent=2,
+        sort_keys=True,
+    ))
+    return 0
+
+
+def cmd_predict(args: argparse.Namespace) -> int:
+    """Score rows with a saved artifact and write a submission-ready CSV."""
+
+    dataset = _load_dataset(args)
+    model = load_deployment_artifact(args.artifact)
+    outcome = predict_unlabeled(dataset, model)
+    probabilities = outcome["probabilities"]
+    predictions = outcome["predictions"]
+    class_names = outcome["class_names"]
+    subject_ids = (
+        dataset.subject_id
+        if dataset.subject_id is not None
+        else np.arange(dataset.n_samples)
+    )
+    target = Path(args.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["subject_id", "predicted_label", "predicted_class"]
+            + [f"p_{name}" for name in class_names]
+        )
+        for index in range(dataset.n_samples):
+            writer.writerow(
+                [
+                    str(subject_ids[index]),
+                    int(predictions[index]),
+                    outcome["predicted_names"][index],
+                    *[float(probabilities[index, column]) for column in range(len(class_names))],
+                ]
+            )
+    print(json.dumps(
+        {
+            "predictions": str(target),
+            "n_rows": int(dataset.n_samples),
+            "artifact": str(args.artifact),
+            "data_digest": outcome["data_digest"],
+            "classes": class_names,
+        },
+        indent=2,
+    ))
+    return 0
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Download a public data file after validating the request target."""
 
@@ -547,11 +638,10 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_matrix(args: argparse.Namespace) -> int:
     """Run binary/multiclass x stratified/LOSO in one command.
 
-    The competition scores both tasks and both cross-validation protocols, so
-    this produces all four in a single invocation.  Each (task, split) group is
-    reported separately because the binary view drops MCI: its subject set and
-    site composition differ from the multiclass view, and they must not be
-    pooled or paired across protocols.
+    The competition scores both tasks and both cross-validation protocols.
+    Each (task, split) group is reported separately because the binary view
+    drops MCI: its subject set and site composition differ from the
+    multiclass view, so they are not pooled or paired across protocols.
     """
 
     dataset = _load_dataset(args)
@@ -665,6 +755,21 @@ def build_parser() -> argparse.ArgumentParser:
     interpret.add_argument("--out", default="reports/interpretation")
     interpret.add_argument("--quiet", action="store_true")
     interpret.set_defaults(func=cmd_interpret)
+
+    fit = sub.add_parser("fit", help="fit a deployable model on all labeled rows")
+    _add_dataset_args(fit)
+    _add_experiment_args(fit)
+    fit.add_argument("--config", help="YAML config overriding the flags above")
+    fit.add_argument("--artifact", required=True, help="output path for the model artifact")
+    fit.set_defaults(func=cmd_fit)
+
+    predict = sub.add_parser(
+        "predict", help="score unlabeled rows with a saved deployment artifact"
+    )
+    _add_dataset_args(predict)
+    predict.add_argument("--artifact", required=True, help="artifact written by the fit command")
+    predict.add_argument("--out", required=True, help="output CSV path for predictions")
+    predict.set_defaults(func=cmd_predict)
 
     fetch = sub.add_parser("fetch", help="download a public file with URL validation")
     fetch.add_argument("--url", required=True)

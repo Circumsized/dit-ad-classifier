@@ -73,8 +73,8 @@ def classification_metrics(y_true, y_pred, probabilities=None) -> dict[str, obje
         "accuracy": float(np.mean(true == pred)),
         "balanced_accuracy": float(np.nanmean(recalls)),
         "macro_f1": float(np.nanmean(f1)),
-        # Weighted F1 sums per-class F1 weighted by class support.  Dividing by
-        # the weights here would cancel them and silently report the macro mean.
+        # Weighted F1 sums per-class F1 weighted by class support; dividing by
+        # the weights would cancel them and yield the macro mean instead.
         "weighted_f1": float(np.sum(f1 * weights)),
         "precision": {str(label): float(value) for label, value in zip(classes, precisions)},
         "class_recall": {str(label): float(value) for label, value in zip(classes, recalls)},
@@ -109,10 +109,10 @@ def classification_metrics(y_true, y_pred, probabilities=None) -> dict[str, obje
 
 
 def competition_metrics(metrics: dict[str, object]) -> dict[str, float | None]:
-    """Extract exactly the three scores the competition reports.
+    """Extract the three scores the competition reports.
 
-    The brief asks for ACC, AUC and F-Score on both the binary and three-class
-    tasks.  Everything else in ``classification_metrics`` is diagnostic.
+    ACC, AUC and F-Score on both the binary and three-class tasks. Everything
+    else in ``classification_metrics`` is diagnostic.
     """
 
     aucs = metrics.get("roc_auc")

@@ -1,22 +1,22 @@
 """Nested feature selection for p >> n AFQ matrices.
 
-The dataset is 14,400 features per subject against 700 subjects, so a
-classifier fed every node of every metric is fitting noise.  Selection here is
-two staged and always fits inside a fold:
+The dataset has 14,400 features per subject against 700 subjects, so a
+classifier fed every node of every metric fits noise. Selection is two staged
+and always fits inside a fold:
 
-1. **block ranking** — a regularized L1 model is fit on the full matrix and
-   its coefficient magnitudes are aggregated per (tract, metric) block.  Blocks
-   are ranked by mean magnitude, which suppresses the fact that MD has three
+1. **block ranking** — a regularized L1 model is fit on the full matrix and its
+   coefficient magnitudes are aggregated per (tract, metric) block. Blocks are
+   ranked by mean magnitude, which suppresses the fact that MD has three
    tensor-identity duplicates among the eight metrics.
-2. **within-block sparsification** — the surviving blocks are kept only where
-   the coefficient is not negligible, so the final model names individual
-   nodes.  This is what makes the post-hoc "consistency of estimated
-   predictors" analysis possible: a sparse solution enumerates anatomical
-   regions, a dense one does not.
+2. **within-block sparsification** — surviving blocks keep only columns whose
+   coefficient is non-negligible, so the final model names individual nodes.
+   A sparse solution enumerates anatomical regions and makes the post-hoc
+   "consistency of estimated predictors" analysis possible; a dense one does
+   not.
 
-The transformer keeps covariate and missing-pattern columns untouched; pruning
-them would either leak demographics into the disease signal or discard the
-missingness indicator.
+Covariate and missing-pattern columns are left untouched; pruning them would
+either leak demographics into the disease signal or discard the missingness
+indicator.
 """
 
 from __future__ import annotations
@@ -51,23 +51,23 @@ class SparseBlockSelector:
         layout:
             Column map describing which anatomical unit each column belongs to.
         top_blocks:
-            Number of (tract, metric) blocks to retain.  ``None`` keeps every
+            Number of (tract, metric) blocks to retain. ``None`` keeps every
             block and only applies within-block pruning.
         min_blocks:
-            Lower bound on retained blocks so a degenerate search cannot drop
+            Lower bound on retained blocks, so a degenerate search cannot drop
             the matrix to a single column.
         C, l1_ratio:
-            Elastic-net regularisation of the ranking model.  ``l1_ratio=1.0``
+            Elastic-net regularisation of the ranking model. ``l1_ratio=1.0``
             is LASSO.
         keep_fraction:
             A node survives when its coefficient magnitude is at least this
             fraction of the largest magnitude inside its block.
         max_features:
-            Hard cap on retained anatomical columns.  ``keep_fraction`` alone
-            leaves the dimensionality data-dependent, so this enforces the
-            p/n budget: when more anatomical columns survive, only the highest
-            magnitude ``max_features`` are kept.  Trailing covariate and
-            missing-pattern columns are always retained and never counted here.
+            Hard cap on retained anatomical columns. ``keep_fraction`` alone
+            leaves the dimensionality data-dependent, so this bounds the p/n
+            budget: when more anatomical columns survive, only the highest
+            magnitude ``max_features`` are kept. Trailing covariate and
+            missing-pattern columns are always retained and not counted here.
             ``None`` disables the cap.
         """
 
@@ -134,7 +134,18 @@ class SparseBlockSelector:
         core = values[:, : layout.n_feature_columns]
 
         prepare = Pipeline(
-            [("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler())]
+            [
+                (
+                    "imputer",
+                    # keep_empty_features: an all-NaN column inside this fold
+                    # would otherwise be dropped, shifting every later
+                    # coefficient away from its anatomical block and tripping
+                    # the width check below. An empty column imputes to 0 and
+                    # simply cannot earn a nonzero ranking coefficient.
+                    SimpleImputer(strategy="median", keep_empty_features=True),
+                ),
+                ("scaler", StandardScaler()),
+            ]
         )
         prepare.fit(core)
         prepared = prepare.transform(core)
@@ -193,9 +204,9 @@ class SparseBlockSelector:
         if kept.size == 0:
             kept = np.asarray([int(np.argmax(magnitudes))], dtype=int)
 
-        # Enforce the hard feature budget: if more anatomical columns survived
-        # the block/threshold stage than allowed, keep only the strongest, so
-        # dimensionality is bounded rather than data-dependent.  Ties break on
+        # Apply the feature budget: if more anatomical columns survived the
+        # block/threshold stage than allowed, keep only the strongest, so
+        # dimensionality is bounded rather than data-dependent. Ties break on
         # column index for determinism.
         if self.max_features is not None and kept.size > self.max_features:
             order = sorted(kept.tolist(), key=lambda column: (-magnitudes[column], column))
