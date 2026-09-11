@@ -1,9 +1,8 @@
 """Assemble and persist evaluation reports.
 
-A number without its protocol is not a result.  Every report therefore carries
-the split strategy, the feature view, the covariate policy, the threshold
-criterion, the per-fold detail, and the exact environment that produced it, so
-a score can be reproduced or refuted by someone who was not in the room.
+Reports record the split strategy, feature view, covariate policy, threshold
+criterion, per-fold detail, and the runtime environment, so results stay
+reproducible.
 """
 
 from __future__ import annotations
@@ -51,10 +50,8 @@ def environment_fingerprint(seed: int | None = None) -> dict[str, object]:
         )
         if commit.returncode == 0 and commit.stdout.strip():
             fingerprint["git_commit"] = commit.stdout.strip()
-        # A dirty worktree means the short commit alone cannot reproduce this
-        # report, so record it and how many files differ.  This matters here:
-        # the rewrite is largely uncommitted, so ``git_commit`` would otherwise
-        # point at an older tree than the code that actually ran.
+        # A dirty worktree means the short commit alone does not pin the code
+        # that ran, so record that and how many files differ.
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
@@ -87,12 +84,9 @@ def _fold_table(result) -> list[dict[str, object]]:
             "ece": fold.get("ece"),
             "brier_score": fold.get("brier_score"),
         }
-        # Fit provenance.  Without it a reported probability cannot be traced
-        # back to the calibration that produced it, so an ensemble average
-        # cannot be audited at all.  ``weights`` and ``base_models`` carry the
-        # per-fold composition of an ensemble, including whether a deep member
-        # was calibrated -- decided inside run_ensemble, so nowhere else to
-        # record it.
+        # Fit provenance for auditing ensembles: ``weights`` and
+        # ``base_models`` carry the per-fold ensemble composition, including
+        # whether a deep member was calibrated.
         for key in (
             "best_params",
             "tuning_score",
@@ -146,10 +140,8 @@ def _freeze(value: object) -> object:
 def build_covariate_ablation_comparisons(results: list) -> list[dict[str, object]]:
     """Return only predeclared matched-fold covariate ablation comparisons.
 
-    ``feature`` is the reference.  The function deliberately does not compare
-    arbitrary model/view combinations, test a selected winner, or mix split
-    strategies.  Those comparisons would turn an ablation table into a p-value
-    fishing expedition.
+    ``feature`` is the reference. Arbitrary model/view combinations, testing a
+    selected winner, and mixing split strategies are not compared.
     """
 
     groups: dict[tuple[tuple[str, object], ...], dict[str, object]] = {}
@@ -236,8 +228,7 @@ def assemble_report(
         if selection_metrics is not None:
             entry["thresholded_selection_metrics"] = selection_metrics
         # When feature selection ran, report how consistently each anatomical
-        # block/node was chosen across folds -- the competition's "consistency
-        # of estimated predictors", strongest under LOSO.
+        # block/node was chosen across folds.
         if any(isinstance(fold.get("selection"), dict) for fold in result.folds):
             entry["stable_predictors"] = stable_predictors(result.folds)
         payload["results"].append(entry)
@@ -260,18 +251,22 @@ def result_key(result) -> str:
 def _json_safe(value: object) -> object:
     """Replace non-finite floats before strict JSON serialization.
 
-    An unavailable metric must be JSON ``null``, not Python's non-standard
-    ``NaN`` token.  Preserve ordinary scalar and container types recursively.
+    Unavailable metrics become JSON ``null`` instead of the non-standard
+    ``NaN`` token. Scalar and container types are preserved recursively.
     """
 
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
     if isinstance(value, float):
         return value if np.isfinite(value) else None
     if isinstance(value, np.floating):
         numeric = float(value)
         return numeric if np.isfinite(numeric) else None
     if isinstance(value, dict):
-        # Keep integer keys in the in-memory report contract. ``json.dumps``
-        # serializes them as JSON object names at the file boundary.
+        # Integer keys stay in the in-memory contract; ``json.dumps`` turns
+        # them into JSON object names at the file boundary.
         return {key: _json_safe(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_json_safe(item) for item in value]

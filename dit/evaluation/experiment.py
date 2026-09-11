@@ -1,21 +1,19 @@
 """Unified fold-local experiment runner.
 
-This is the entry point the CLI uses.  Every learned component — imputation,
-scaling, covariate residualisation, feature selection, hyperparameter search —
-is instantiated inside a single outer fold so that no statistic from the held-out
-folds can reach the estimator.  ``runner.py`` retains the earlier leaner path;
-this module adds the covariate and selection policy on top of it.
+The CLI enters through this module. Every learned component (imputation,
+scaling, covariate residualisation, feature selection, and hyperparameter
+search) is instantiated within an outer fold, keeping held-out statistics out
+of the estimator. ``runner.py`` retains the leaner path; this module adds the
+covariate and selection policy.
 
-``covariate_strategy`` is the one knob that changes what the model is allowed to
-see:
+``covariate_strategy`` controls what the model can use:
 
 * ``feature``      age and sex enter as ordinary inputs;
 * ``residualize``  the covariate component is regressed out per fold and the
   residuals are classified, isolating white matter structure from demographics;
 * ``none``         demographics are dropped entirely.
 
-The gap between the three is a finding about this dataset, not a bug, so all
-three are run and reported together rather than picking one silently.
+All three strategies are reported because their gap is a dataset result.
 """
 
 from __future__ import annotations
@@ -40,9 +38,12 @@ from dit.evaluation.provenance import fold_provenance
 from dit.evaluation.site_balance import fold_macro_summary
 from dit.evaluation.threshold import ThresholdPolicy, fit_threshold
 from dit.models.classical import (
+    CONTROL_VIEWS,
     align_probabilities,
+    build_control_matrix,
     build_feature_matrix,
     describe_feature_layout,
+    fitted_pipeline_step,
     make_search_estimator,
 )
 from dit.models import ALIGNMENTS
@@ -50,11 +51,11 @@ from dit.models.calibration import CALIBRATIONS
 
 
 def _load_deep_modules() -> tuple[Any, Any]:
-    """Import the torch-dependent training loop only when a deep model is used.
+    """Import the torch training loop when a deep model is selected.
 
-    PyTorch is an optional extra, so the classical path, the CLI and the config
-    loader must import without it.  This is the single place that crosses into
-    torch, and it fails with the install hint rather than a bare ImportError.
+    PyTorch is optional, so the classical path, CLI, and config loader import
+    without it. This is the only boundary into torch and provides the install
+    hint when the extra is missing.
     """
 
     try:
@@ -119,6 +120,15 @@ class ExperimentConfig:
     device: str = "cpu"
     ensemble_models: tuple[str, ...] = DEFAULT_ENSEMBLE_MODELS
     ensemble_weighting: str = "inner_score"
+    # The inner search optimises this scorer on estimator.predict(); the outer
+    # report scores argmax(predict_proba()).  Declaring both makes the contract
+    # explicit: where they can disagree (see make_search_estimator), the report
+    # names which rule produced its numbers.
+    selection_metric: str = "balanced_accuracy"
+    # Negative-control input: demographics alone or missingness alone, run
+    # through the same folds and metrics as the imaging views. ``None`` keeps
+    # the configured anatomical feature view.
+    control_view: str | None = None
 
     def __post_init__(self) -> None:
         if self.covariate_strategy not in COVARIATE_STRATEGIES:
@@ -152,6 +162,12 @@ class ExperimentConfig:
             raise ValueError(f"unknown deep_calibration {self.deep_calibration!r}; use {CALIBRATIONS}")
         if len(set(self.ensemble_models)) != len(self.ensemble_models):
             raise ValueError("ensemble_models must not repeat a model")
+        if not isinstance(self.selection_metric, str) or not self.selection_metric:
+            raise ValueError("selection_metric must be a non-empty scorer name")
+        if self.control_view is not None and self.control_view not in CONTROL_VIEWS:
+            raise ValueError(
+                f"unknown control_view {self.control_view!r}; use one of {CONTROL_VIEWS} or None"
+            )
 
     def describe(self) -> dict[str, object]:
         return {
@@ -167,12 +183,11 @@ class ExperimentConfig:
 
 @dataclass(frozen=True)
 class ExperimentResult:
-    """Outer-CV metrics, a deployment policy and selection diagnostics.
+    """Outer-CV metrics, a deployment policy, and selection diagnostics.
 
-    ``predictions`` and ``aggregate`` are the honest outer-fold argmax
-    evaluation.  ``threshold`` is fitted after that evaluation for future
-    deployment, so applying it to ``probabilities`` is intentionally not the
-    same operation as recreating ``predictions``.
+    ``predictions`` and ``aggregate`` are the outer-fold argmax evaluation.
+    ``threshold`` is fitted afterward for deployment, so applying it to
+    ``probabilities`` does not recreate ``predictions``.
     """
 
     config: ExperimentConfig
@@ -190,11 +205,14 @@ class ExperimentResult:
     @property
     def key(self) -> str:
         cfg = self.config
-        return (
+        base = (
             f"{self.model_name}|{cfg.task}|{cfg.split_strategy}|"
             f"{cfg.feature_view}|{cfg.covariate_strategy}|"
             f"{cfg.smooth_window}"
         )
+        # Appended only when set, so keys for ordinary runs stay identical to
+        # earlier reports.
+        return f"{base}|{cfg.control_view}" if cfg.control_view else base
 
     def to_fold_dicts(self) -> tuple[dict[str, object], ...]:
         return self.folds
@@ -204,9 +222,8 @@ class ExperimentResult:
 
         from dit.evaluation.runner import EvaluationResult
 
-        # The deep path always consumes the raw 4-D profiles regardless of the
-        # requested feature_view, so a report must not claim it used, say,
-        # ``summary``; label it ``profiles`` to stay truthful.
+        # The deep path always consumes raw 4-D profiles. Label it ``profiles``
+        # instead of using the configured view, which the deep path ignores.
         is_deep = self.model_name.lower() in DEEP_MODELS
         view_label = "profiles" if is_deep else self.config.feature_view
         return EvaluationResult(
@@ -229,28 +246,48 @@ def prepare_matrix(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Build the full feature matrix and its column map for one task view.
 
-    Returns the matrix, the covariate block used for residualisation, and the
-    metadata describing which columns are anatomical.
+    Under ``residualize`` the covariates ride along as the matrix's trailing
+    columns so the pipeline's :class:`ResidualizeCovariates` step can strip and
+    regress them out fold-internally; ``model_layout`` then describes the
+    columns the classifier actually sees (covariates removed). Under a
+    negative-control view the matrix *is* the control input and no layout
+    applies. Returns the matrix, the standalone covariate block used by the
+    deep path, and the metadata describing which columns are anatomical.
     """
 
+    if config.control_view is not None:
+        features, names = build_control_matrix(view, config.control_view)
+        covariates = covariate_matrix(view.age, view.sex, view.n_samples)
+        return features, covariates, {
+            "layout": None,
+            "model_layout": None,
+            "control_names": tuple(names),
+            "n_core_columns": int(features.shape[1]),
+        }
+
     include_covariates = config.covariates_as_features
+    residualize = config.covariate_strategy == "residualize"
     features = build_feature_matrix(
         view,
         view=config.feature_view,
         smooth_window=config.smooth_window,
-        include_covariates=include_covariates,
+        include_covariates=include_covariates or residualize,
         include_missing_pattern=config.include_missing_pattern,
     )
     layout = describe_feature_layout(
         view,
         view=config.feature_view,
-        include_covariates=include_covariates,
+        include_covariates=include_covariates or residualize,
         include_missing_pattern=config.include_missing_pattern,
     )
     layout.validate(features.shape[1])
+    model_layout = (
+        replace(layout, has_covariates=False) if residualize and not include_covariates else layout
+    )
     covariates = covariate_matrix(view.age, view.sex, view.n_samples)
     return features, covariates, {
         "layout": layout,
+        "model_layout": model_layout,
         "n_core_columns": layout.n_feature_columns,
     }
 
@@ -261,12 +298,42 @@ def _apply_residualizer(
     train_cov: np.ndarray,
     test_cov: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, Residualizer]:
+    """Standalone residualization kept for direct callers and tests.
+
+    The experiment path no longer uses it: residualization there lives inside
+    the sklearn pipeline (see :func:`make_search_estimator`), which is what
+    keeps the regression fold-local under nested search.
+    """
+
     fitted = Residualizer().fit(train, train_cov)
     return (
         fitted.transform(train, train_cov),
         fitted.transform(test, test_cov),
         fitted,
     )
+
+
+def _require_inner_class_support(cv: Any, y_train: np.ndarray, groups: np.ndarray | None) -> None:
+    """Fail before the search when an inner validation slice misses a class.
+
+    Balanced accuracy averages per-class recall over the classes present in the
+    scored rows, so a candidate judged on a slice without every class would win
+    grid points on a partial — and therefore incomparable — score.
+    """
+
+    y = np.asarray(y_train).reshape(-1)
+    expected = set(np.unique(y).tolist())
+    stub = np.zeros((y.size, 1))
+    for position, (_, validation) in enumerate(cv.split(stub, y, groups)):
+        present = set(np.unique(y[validation]).tolist())
+        missing = sorted(expected - present)
+        if missing:
+            raise ValueError(
+                f"inner fold {position} holds out rows without classes {missing}; "
+                "the search would score candidates on a partial class set. "
+                "Reduce inner_splits or use a split strategy that keeps every "
+                "class inside each inner validation slice."
+            )
 
 
 def _deep_train_config(config: ExperimentConfig) -> "DomainTrainConfig":
@@ -295,13 +362,16 @@ def _fit_deep_fold(
     test_covariates: np.ndarray | None,
     train_site: np.ndarray | None,
     config: ExperimentConfig,
+    n_classes: int,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Tune, fit and score the profile Transformer on one outer fold.
 
     The grid search is inner-fold only, exactly like the sklearn path: the
     tuning and validation slices come from ``train_profiles`` and the
     returned probabilities are produced by a refit on the whole outer training
-    fold.
+    fold. ``n_classes`` is the task-view class count, not the training fold's
+    observed maximum: aligning to the training fold would silently narrow the
+    probability matrix when the outer training rows miss the highest class.
     """
 
     _, search_domain_classifier = _load_deep_modules()
@@ -314,11 +384,14 @@ def _fit_deep_fold(
         device=config.device,
     )
     probabilities = align_probabilities(
-        classifier.predict_proba(test_profiles, test_covariates), classifier.classes_, int(np.max(y_train)) + 1
+        classifier.predict_proba(test_profiles, test_covariates),
+        classifier.classes_,
+        n_classes,
     )
     return probabilities, {
         "best_params": search_report["best_params"],
         "tuning_score": float(search_report["tuning_score"]),
+        "epochs_requested": search_report.get("epochs_requested"),
         "training": classifier.parameters(),
         "alignment_grid": search_report["grid"],
     }
@@ -356,7 +429,8 @@ def run_experiment(
         raise ValueError("binary view must not contain MCI labels")
 
     features, covariates, meta = prepare_matrix(view, config)
-    layout = meta["layout"]
+    layout = meta["model_layout"]
+    control_names: tuple[str, ...] | None = meta.get("control_names")
     n_classes = int(np.max(view.y)) + 1
     oof_prob = np.full((view.n_samples, n_classes), np.nan, dtype=float)
     oof_pred = np.full(view.n_samples, -1, dtype=int)
@@ -364,10 +438,19 @@ def run_experiment(
     last_selection: dict[str, object] | None = None
 
     is_deep = config.model.lower() in DEEP_MODELS
+    if config.control_view is not None:
+        # A control isolates one input channel; combining it with a deep
+        # network, feature selection, residualization or an ensemble changes
+        # the question it answers.
+        if is_deep:
+            raise ValueError("control views are defined for classical models only")
+        if config.enable_selection:
+            raise ValueError("feature selection does not apply to control views")
+        if config.covariate_strategy == "residualize":
+            raise ValueError("residualization does not apply to control views")
     if not is_deep and config.alignment != "none":
-        # Domain alignment is a term in the Transformer's training loss; a
-        # classical sklearn model has no such loss, so silently ignoring the
-        # flag would misreport what was run.  Fail loudly instead.
+        # Domain alignment is part of the Transformer loss; classical sklearn
+        # models have no corresponding term.
         raise ValueError(
             f"alignment={config.alignment!r} only applies to the profile Transformer; "
             f"classical model {config.model!r} has no alignment loss"
@@ -383,8 +466,8 @@ def run_experiment(
             "use 'feature' or 'none'"
         )
     if is_deep:
-        # Cross into torch once, up front, so a missing optional extra fails with
-        # the install hint before any fold runs rather than mid-evaluation.
+        # Import torch before folds start so a missing optional extra reports
+        # the install hint at startup.
         _load_deep_modules()
     # The deep path keeps the 4-D profiles; the classical path uses the table.
     profiles = smooth_profiles(view.X, window=config.smooth_window) if is_deep else None
@@ -406,6 +489,7 @@ def run_experiment(
             task=config.task,
             split_strategy=config.split_strategy,
             site=view.site,
+            data_digest=view.data_digest,
         )
 
         if is_deep:
@@ -417,6 +501,7 @@ def run_experiment(
                 deep_covariates[test_idx] if deep_covariates is not None else None,
                 None if view.site is None else view.site[train_idx],
                 config,
+                n_classes,
             )
             oof_prob[test_idx] = probabilities
             oof_pred[test_idx] = np.argmax(probabilities, axis=1)
@@ -435,21 +520,14 @@ def run_experiment(
 
         train_x = features[train_idx]
         test_x = features[test_idx]
-
-        if config.covariate_strategy == "residualize":
-            train_x, test_x, residualizer = _apply_residualizer(
-                train_x,
-                test_x,
-                covariates[train_idx],
-                covariates[test_idx],
-            )
-        else:
-            residualizer = None
+        residualize = config.covariate_strategy == "residualize"
 
         # The selector is handed to the search so it is fit inside every inner
         # CV fold, not once on the whole outer-training fold.  Fitting it before
         # GridSearchCV would let inner-validation labels pick the columns the
-        # search then scores, an optimistic model/hyperparameter choice.
+        # search then scores, an optimistic model/hyperparameter choice.  Under
+        # residualization the selector sees the covariate-free residuals, and
+        # the regression itself is refit inside each inner fold as well.
         selector: SparseBlockSelector | None = None
         if config.enable_selection:
             selector = SparseBlockSelector(
@@ -465,13 +543,15 @@ def run_experiment(
             None if view.site is None else view.site[train_idx],
             config,
         )
+        _require_inner_class_support(cv, view.y[train_idx], groups)
         search = make_search_estimator(
             config.model,
             cv=cv,
             seed=config.seed,
-            scoring="balanced_accuracy",
+            scoring=config.selection_metric,
             n_jobs=config.n_jobs,
             selector=selector,
+            residualize=residualize,
         )
         fit_kwargs: dict[str, Any] = {}
         if groups is not None:
@@ -488,10 +568,9 @@ def run_experiment(
         # Read the selector that was refit on the full outer-training fold, so
         # the per-fold diagnostics describe the model actually scored on the
         # held-out rows.
-        fitted_selector = None
-        n_features_used = int(train_x.shape[1])
-        if selector is not None:
-            fitted_selector = search.best_estimator_.named_steps["selector"]
+        fitted_selector = fitted_pipeline_step(search, "selector")
+        n_features_used = layout.total_features if residualize else int(train_x.shape[1])
+        if fitted_selector is not None:
             n_features_used = int(fitted_selector.n_selected)
 
         report = classification_metrics(view.y[test_idx], predictions, probabilities)
@@ -506,8 +585,20 @@ def run_experiment(
                 **provenance,
             }
         )
-        if residualizer is not None:
-            report["residualizer"] = residualizer.parameters()
+        # Actual inner-search accounting, so reports state what was computed
+        # rather than leaving the reader to infer it from the grid.
+        n_candidates = len(search.cv_results_["params"])
+        report["inner_budget"] = {
+            "n_candidates": n_candidates,
+            "n_inner_folds": int(cv.get_n_splits(groups=groups)),
+            "n_fits": n_candidates * int(cv.get_n_splits(groups=groups)) + 1,
+            "candidate_fit_seconds": float(
+                np.sum(search.cv_results_.get("mean_fit_time", np.zeros(n_candidates)))
+            ),
+        }
+        if residualize:
+            fitted_residualizer = fitted_pipeline_step(search, "residualizer")
+            report["residualizer"] = fitted_residualizer.residualizer_.parameters()
         if fitted_selector is not None:
             fold_selection = fitted_selector.report()
             report["selection"] = fold_selection
@@ -520,17 +611,23 @@ def run_experiment(
         ).tolist()
         raise RuntimeError(f"cross-validation did not predict every subject: {missing[:10]}")
 
-    # The outer-fold argmax is the honest performance estimate: each row was
-    # predicted by a model that did not train on that row, and no later
-    # decision rule has seen its label yet.
+    # The outer-fold argmax is the performance estimate: each row came from a
+    # model that did not train on it, before any rule observed its label.
     oof_argmax_metrics = classification_metrics(view.y, oof_pred, oof_prob)
     aggregate = dict(oof_argmax_metrics)
     aggregate["threshold_criterion"] = config.threshold_criterion
     aggregate["threshold_evaluation"] = "outer_oof_argmax"
     aggregate["aggregate_argmax_accuracy"] = float(np.mean(oof_pred == view.y))
-    # Class names must come from the view's own mapping: a binary view
-    # renumbers the labels (1=AD), so the global canonical table would
-    # misname the disease class as MCI.
+    # Declared alongside the numbers: the inner search optimised
+    # selection_metric on estimator.predict(), the rows below are argmax over
+    # predict_proba(). For the calibrated-SVM path the two coincide by
+    # construction; the field keeps the contract checkable rather than assumed.
+    aggregate["selection_metric"] = config.selection_metric
+    aggregate["prediction_rule"] = "predict_proba_argmax"
+    if config.control_view is not None:
+        aggregate["control_view"] = config.control_view
+    # Use the task view's label mapping. Binary views renumber AD to class 1;
+    # the global canonical table would name it MCI.
     aggregate["class_names"] = [
         view.label_map[int(c)] for c in sorted(set(view.y.tolist()))
     ]
@@ -538,9 +635,8 @@ def run_experiment(
     # equally and drops incomparable folds, which matters most for LOSO.
     aggregate["fold_macro"] = fold_macro_summary(fold_reports)
 
-    # Fit the requested adaptive rule only as a final deployment policy.  Its
-    # score is deliberately kept separate because this same OOF label set was
-    # used to choose the policy and therefore cannot evaluate it independently.
+    # Fit the adaptive rule as a deployment policy. Its score stays separate
+    # because the same OOF labels selected the policy.
     policy = fit_threshold(
         view.y,
         oof_prob,
@@ -558,7 +654,7 @@ def run_experiment(
         predictions=oof_pred,
         probabilities=oof_prob,
         threshold=policy,
-        feature_names=tuple(layout.feature_names()),
+        feature_names=control_names if control_names is not None else tuple(layout.feature_names()),
         selection_report=last_selection,
         oof_argmax=oof_argmax_metrics,
         thresholded_selection_metrics=thresholded_selection_metrics,
@@ -568,11 +664,9 @@ def run_experiment(
 def _fold_weights(scores: list[float], weighting: str) -> np.ndarray:
     """Normalised per-fold weights for soft voting.
 
-    ``inner_score`` weights each base model by the balanced accuracy its nested
-    search achieved on this fold.  That number comes from inside the same outer
-    fold, so weighting on it is not leakage.  A base model that scored zero or
-    worse gets weight zero instead of dragging the average down, and if every
-    base model is unusable on a fold the weights fall back to equal.
+    ``inner_score`` uses each base model's balanced accuracy from nested search
+    within the same outer fold, avoiding leakage. Non-positive scores receive
+    zero weight; if all scores are unusable, weights fall back to equal.
     """
 
     if weighting == "equal":
@@ -585,14 +679,11 @@ def _fold_weights(scores: list[float], weighting: str) -> np.ndarray:
 
 
 def _base_config_for_ensemble(config: ExperimentConfig, model: str) -> ExperimentConfig:
-    """Per-base configuration, enabling calibration where a base is deep.
+    """Per-base configuration, enabling calibration for deep members.
 
-    Soft voting averages probabilities, and only those are comparable across
-    models.  A class-weighted Transformer emits systematically inflated
-    confidences, so leaving it uncalibrated would let its vote dominate on
-    scale rather than on information.  The ensemble switches on temperature
-    calibration for a deep base itself instead of trusting the caller to
-    remember, and never overrides an explicit user choice.
+    Soft voting averages probabilities, so their scales must be comparable.
+    Class weighting can inflate Transformer confidence; temperature calibration
+    keeps that vote from dominating by scale. Explicit user choices are kept.
     """
 
     base = replace(config, model=model)
@@ -607,17 +698,18 @@ def run_ensemble(
 ) -> ExperimentResult:
     """Soft-vote across the base lineup on out-of-fold probabilities.
 
-    Each base model is run through :func:`run_experiment` with its own nested
-    search, so every averaged probability remains out of fold for the subject
-    it describes.  Weights are recomputed per fold rather than once globally:
-    which model is informative differs by fold, and a single global weighting
-    would silently assume otherwise.
+    Each base model runs through :func:`run_experiment` with its own nested
+    search, keeping every averaged probability out of fold for its subject.
+    Weights are recomputed per fold because model informativeness can vary
+    across folds.
     """
 
     config = config or ExperimentConfig()
     view = dataset.task_view(config.task)
     if view.y is None:
         raise ValueError("evaluation requires labels")
+    if config.control_view is not None:
+        raise ValueError("control views cannot enter an ensemble; run them standalone")
 
     base_configs = [_base_config_for_ensemble(config, model) for model in config.ensemble_models]
     base_results = [run_experiment(dataset, base_config) for base_config in base_configs]
@@ -626,10 +718,9 @@ def run_ensemble(
     fold_reports: list[dict[str, object]] = []
 
     def _fold_tuning_score(fold: dict[str, object]) -> float:
-        # Deep folds report their nested-search score as ``tuning_score``
-        # (there is no sklearn GridSearchCV to name ``inner_best_score``
-        # after); reading only the classical key would silently weight every
-        # deep member of the lineup to zero.
+        # Deep folds use ``tuning_score`` because they do not use sklearn
+        # GridSearchCV. Falling back only to the classical key would give deep
+        # members zero weight.
         raw = fold.get("inner_best_score", fold.get("tuning_score", 0.0))
         return float(raw) if raw is not None else 0.0
 
@@ -672,6 +763,7 @@ def run_ensemble(
             task=config.task,
             split_strategy=config.split_strategy,
             site=view.site,
+            data_digest=view.data_digest,
         )
         fold_reports.append(
             {

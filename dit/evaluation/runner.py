@@ -92,6 +92,7 @@ def evaluate_classical(
             task=task,
             split_strategy=split_strategy,
             site=view.site,
+            data_digest=view.data_digest,
         )
         cv, groups = _inner_cv(
             view.y[train_idx],
@@ -130,10 +131,7 @@ def evaluate_classical(
         )
         fold_reports.append(report)
 
-    valid = (oof_pred >= 0) & np.all(np.isfinite(oof_prob), axis=1)
-    if not np.all(valid):
-        missing = np.flatnonzero(~valid).tolist()
-        raise RuntimeError(f"cross-validation did not predict every subject: {missing[:10]}")
+    _ensure_complete_oof(oof_pred, oof_prob)
     aggregate = classification_metrics(view.y, oof_pred, oof_prob)
     return EvaluationResult(
         model=model_name,
@@ -188,6 +186,7 @@ def evaluate_metric_ensemble(
             task=task,
             split_strategy=split_strategy,
             site=view.site,
+            data_digest=view.data_digest,
         )
         cv, groups = _inner_cv(
             view.y[train_idx],
@@ -226,6 +225,7 @@ def evaluate_metric_ensemble(
         )
         fold_reports.append(report)
 
+    _ensure_complete_oof(oof_pred, oof_prob)
     aggregate = classification_metrics(view.y, oof_pred, oof_prob)
     return EvaluationResult(
         model="metric_ensemble_linear_svm",
@@ -237,6 +237,22 @@ def evaluate_metric_ensemble(
         predictions=oof_pred,
         probabilities=oof_prob,
     )
+
+
+def _ensure_complete_oof(
+    predictions: np.ndarray,
+    probabilities: np.ndarray,
+) -> None:
+    """Fail if any subject was never predicted by an outer fold.
+
+    ``split_indices`` yields a partition, so a gap means a fold failed to
+    write its probabilities; scoring the covered subset would hide that.
+    """
+
+    valid = (predictions >= 0) & np.all(np.isfinite(probabilities), axis=1)
+    if not np.all(valid):
+        missing = np.flatnonzero(~valid).tolist()
+        raise RuntimeError(f"cross-validation did not predict every subject: {missing[:10]}")
 
 
 def _inner_cv(y, site, *, strategy: str, n_splits: int, seed: int):

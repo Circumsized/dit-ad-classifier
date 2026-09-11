@@ -1,15 +1,13 @@
 """Post-hoc probability calibration for the profile Transformer.
 
-A network trained with class-weighted cross-entropy learns to separate the
-classes, not to report the posterior: the softmax it emits is systematically
-over- or under-confident.  That is invisible to every ranking-based metric, so
-accuracy and AUC stay intact while the probability values are unusable, and it
-is exactly why the Transformer must not be averaged into the ensemble with
-models whose probabilities have already been calibrated.
+A network trained with class-weighted cross-entropy separates the classes but
+does not report the posterior, so its softmax is systematically over- or
+under-confident. Ranking-based metrics such as accuracy and AUC do not detect
+this, so the Transformer's raw probabilities should not be averaged into the
+ensemble alongside already-calibrated models.
 
-Both helpers here are fit on rows the network was not tuned on, and both leave
-the class ordering untouched -- a correctly calibrated map changes only how
-confident the network sounds, never which class it calls.
+Both helpers are fit on rows the network was not tuned on, and both leave the
+class ordering untouched: they change confidence, not the predicted class.
 """
 
 from __future__ import annotations
@@ -22,10 +20,9 @@ import numpy as np
 CALIBRATIONS: tuple[str, ...] = ("none", "temperature", "sigmoid")
 
 # Search range for the temperature in log space, i.e. T in
-# [e**-5, e**5] ~ [0.007, 148].  Wider is only noise: beyond it the loss is
-# flat, so a boundary answer means the data asked for something implausible.
-# It is public because a caller must be able to tell a clipped answer from a
-# fitted one -- see :func:`temperature_saturated`.
+# [e**-5, e**5] ~ [0.007, 148]. Beyond that the loss is flat, so a boundary
+# answer means the data asked for something implausible. Public so a caller
+# can tell a clipped answer from a fitted one; see :func:`temperature_saturated`.
 TEMPERATURE_LOG_BOUNDS: tuple[float, float] = (-5.0, 5.0)
 _GOLDEN_RATIO: float = (np.sqrt(5.0) + 1.0) / 2.0
 
@@ -33,9 +30,9 @@ _GOLDEN_RATIO: float = (np.sqrt(5.0) + 1.0) / 2.0
 def temperature_saturated(value: float) -> bool:
     """Whether a fitted temperature landed on the edge of the search range.
 
-    Reported alongside the value itself: on degenerate input the objective is
-    flat and the search walks to the wall, so ``148.4`` can be either a genuine
-    fit or a clipped answer.  Both are indistinguishable from the number alone.
+    Reported alongside the value: on degenerate input the objective is flat and
+    the search walks to the wall, so ``148.4`` can be either a genuine fit or a
+    clipped one, and the number alone does not distinguish them.
     """
 
     low = np.exp(TEMPERATURE_LOG_BOUNDS[0] + 1e-6)
@@ -46,8 +43,8 @@ def temperature_saturated(value: float) -> bool:
 # Share of a class's own mean probability that a Platt map must retain.
 # Relative rather than absolute: a measured degenerate fit retains 0.56 while a
 # legitimate one retains 0.90, whereas in absolute terms the two cases sit at
-# 0.176 and 0.086 -- overlapping, because the drop scales with how confident
-# the network was to start with.
+# 0.176 and 0.086 and overlap, because the drop scales with the network's
+# initial confidence.
 _PLATT_MASS_RETENTION = 0.85
 
 
@@ -61,9 +58,9 @@ def nll_at_temperature(logits: np.ndarray, labels: np.ndarray, temperature: floa
     scaled = logits / float(temperature)
     scaled = scaled - scaled.max(axis=1, keepdims=True)
     log_probs = scaled - np.log(np.exp(scaled).sum(axis=1, keepdims=True))
-    # ``log_probs`` is already in log space: applying log again would turn the
-    # objective into a function of the log of a log, which has its own minimum
-    # and would send the search to the edge of the range.
+    # ``log_probs`` is already in log space; applying log again would make the
+    # objective a function of the log of a log, with its own minimum, and send
+    # the search to the edge of the range.
     gathered = log_probs[np.arange(labels.shape[0]), labels]
     return float(-np.mean(gathered))
 
@@ -72,8 +69,7 @@ def temperature_scale(logits: np.ndarray, labels: np.ndarray) -> float:
     """Fit one temperature that minimises NLL on ``logits``.
 
     Golden-section search in log space, so the scan is uniform in the quantity
-    that actually matters.  Returns ``1.0`` for degenerate input instead of
-    inventing a correction.
+    being fitted. Returns ``1.0`` for degenerate input.
     """
 
     logits = np.asarray(logits, dtype=float)
@@ -85,9 +81,8 @@ def temperature_scale(logits: np.ndarray, labels: np.ndarray) -> float:
     if np.any(labels < 0) or int(labels.max()) >= logits.shape[1]:
         raise ValueError("labels must address a class in the logits")
     if not np.isfinite(logits).all():
-        # A NaN makes every comparison in the bracketing loop evaluate False, so
-        # the interval never moves and the search exits at its initial bounds --
-        # the boundary value, which reads like a fitted answer.
+        # Non-finite logits make all bracketing comparisons false, leaving the
+        # interval at its initial bounds and returning a boundary value.
         raise ValueError(
             "logits must be finite; a non-finite value makes the objective "
             "undefined and the search returns the range boundary"
@@ -100,7 +95,7 @@ def temperature_scale(logits: np.ndarray, labels: np.ndarray) -> float:
     second_nll = nll_at_temperature(logits, labels, np.exp(second))
 
     # 200 is a safety cap; the convergence break below fires near iteration 50,
-    # so do not read the literal as a tuning knob.
+    # so the literal is not a tuning knob.
     for _ in range(200):
         if first_nll < second_nll:
             high, second, second_nll = second, first, first_nll
@@ -120,17 +115,15 @@ def temperature_scale(logits: np.ndarray, labels: np.ndarray) -> float:
 def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any]:
     """Fit one binary logistic on the class probabilities per target class.
 
-    This is the multiclass Platt construction that scikit-learn applies inside
+    This is the multiclass Platt construction scikit-learn applies inside
     ``CalibratedClassifierCV``: each estimator maps the raw class-probability
-    vector onto the probability of one class.  A class with fewer than two
-    calibration rows cannot be calibrated at all, and refusing is the only
-    honest answer -- inventing a scalar would look calibrated and be made up.
+    vector onto the probability of one class. A class with fewer than two
+    calibration rows cannot be calibrated, so the fit is refused.
 
-    The row-count floor is necessary but not sufficient: with two support rows a
-    class can still be fitted, and the map can come back having thrown away most
-    of that class's mass.  ``ece`` will not reveal this, because it bins by
-    confidence and never asks which class is wrong, so the fitted map is checked
-    against the mass it replaced before being returned.
+    The row-count floor is necessary but not sufficient: with two support rows,
+    a class can still be fitted while losing most of its probability mass.
+    Since ``ece`` bins by confidence without identifying the wrong class, the
+    fitted map is checked against the mass it replaced before being returned.
     """
 
     from sklearn.linear_model import LogisticRegression
@@ -142,9 +135,9 @@ def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any
     if not np.isfinite(probabilities).all():
         raise ValueError("probabilities must be finite")
     if np.any(labels < 0) or int(labels.max()) >= probabilities.shape[1]:
-        # Without this a label vector naming a class the matrix lacks is quietly
-        # truncated: only ``range(probabilities.shape[1])`` classes get fitted,
-        # and the rest vanish from the output.
+        # Without this, a label vector naming a class the matrix lacks is
+        # truncated: only ``range(probabilities.shape[1])`` classes get fitted
+        # and the rest are dropped from the output.
         raise ValueError("labels must address a class in the probabilities")
 
     scalars: list[Any] = []
@@ -173,10 +166,9 @@ def _assert_no_mass_loss(
 
     Measured on a 3-class slice where one class held two rows drawn from the
     same cluster as the others, that class's mean probability on its own rows
-    fell from 0.398 to 0.222 while ``ece`` improved from 0.17 to 0.02 -- the
-    standard metric rewards the failure.  The check is on the change in true-
-    class mass rather than on support size, because a class with two rows that
-    is genuinely separable calibrates correctly and must not be refused.
+    fell from 0.398 to 0.222 while ``ece`` improved from 0.17 to 0.02. The check
+    uses the change in true-class mass rather than support size, because a class
+    with two rows that is genuinely separable calibrates correctly.
     """
 
     for class_index in range(raw.shape[1]):

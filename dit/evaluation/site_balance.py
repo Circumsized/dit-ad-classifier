@@ -1,9 +1,8 @@
 """Site composition and matched-fold evaluation summaries.
 
-Leave-one-site-out only means something when the held-out site contains the
-classes required by the task. This module makes site imbalance explicit and
-provides descriptive fold spread plus an ID-aware, exploratory paired test for
-predeclared ablation comparisons.
+LOSO folds are only comparable when the held-out site contains the classes
+the task requires. Reports site imbalance, fold spread, and an ID-matched
+paired test for predeclared ablation comparisons.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ def site_composition(
     Every site reports every class present in the task view, including zero
     counts. A site is ``thin`` when any expected class has fewer than
     ``min_per_class`` members, and ``degenerate`` when only one class is
-    observed, so incomparable LOSO folds cannot hide behind omitted keys.
+    observed.
     """
 
     groups = np.asarray(site).reshape(-1)
@@ -79,9 +78,8 @@ def site_composition(
         "min_per_class": int(min_per_class),
         "n_subjects": int(labels.size),
         "degenerate_sites": [row["site"] for row in rows if row["degenerate"]],
-        # A degenerate site is already listed separately; keep ``thin_sites``
-        # as the existing non-degenerate, low-support category while each row's
-        # own ``thin`` flag still records the missing-class condition.
+        # Degenerate sites are listed separately, so ``thin_sites`` covers the
+        # non-degenerate low-support case; each row keeps its own ``thin`` flag.
         "thin_sites": [
             row["site"] for row in rows if row["thin"] and not row["degenerate"]
         ],
@@ -149,9 +147,9 @@ def fold_macro_summary(
     """Unweighted per-fold summary that complements the pooled OOF aggregate.
 
     The pooled aggregate weights every subject equally, so larger LOSO sites
-    dominate.  This reports the unweighted mean/median/range across folds and
-    excludes folds flagged ``fold_comparable=False`` (a held-out site missing a
-    class), whose metric is on a different label set and must not be pooled.
+    dominate. This reports the unweighted mean/median/range across folds and
+    excludes folds flagged ``fold_comparable=False`` (a held-out site missing
+    a class), whose metric is on a different label set.
     """
 
     comparable = [
@@ -194,12 +192,11 @@ def stable_predictors(
 ) -> dict[str, object]:
     """Cross-fold selection frequency of anatomical blocks and nodes.
 
-    The competition asks for the consistency of the estimated predictors.  Each
-    outer fold selects its features independently, so a predictor that survives
-    in many folds is more trustworthy than one selected once.  This counts, over
-    the folds that actually ran selection, how often each block and each
-    (block, node) was retained, and reports the frequency as count over the
-    number of selection folds.  It is descriptive: it does not claim a p-value.
+    Each outer fold selects its features independently, so a predictor
+    retained in many folds is more trustworthy than one selected once. Counts
+    how often each block and each (block, node) was retained over the folds
+    that ran selection, reported as count over the number of selection folds.
+    Descriptive only; no p-value is implied.
     """
 
     selections = [
@@ -242,9 +239,8 @@ def stable_predictors(
 def pairwise_fold_delta(fold_metrics: list[float]) -> dict[str, object]:
     """Summarize the dispersion of one result's finite fold metrics.
 
-    This is descriptive only. It does not compare two models and does not
-    compute significance; use :func:`paired_fold_comparison` for a validated,
-    matched-fold comparison.
+    Descriptive only: it compares nothing and computes no significance. See
+    :func:`paired_fold_comparison` for a validated matched-fold comparison.
     """
 
     values = [float(value) for value in fold_metrics if np.isfinite(value)]
@@ -357,7 +353,7 @@ def _fold_map(
 
 
 def _class_counts(fold: Mapping[str, object]) -> dict[str, int] | None:
-    """Validate the class-count manifest without silently coercing corruption."""
+    """Validate the class-count manifest, rejecting corrupt values."""
 
     raw = fold.get("test_class_counts")
     if not isinstance(raw, Mapping) or not raw:
@@ -376,6 +372,17 @@ def _class_counts(fold: Mapping[str, object]) -> dict[str, int] | None:
     return counts
 
 
+def _data_digests(folds: Sequence[Mapping[str, object]]) -> set[str]:
+    """Snapshot digests present in fold manifests (empty when unreported)."""
+
+    digests: set[str] = set()
+    for fold in folds:
+        value = fold.get("data_digest")
+        if isinstance(value, str) and value:
+            digests.add(value)
+    return digests
+
+
 def _minimum_two_sided_p(n_nonzero: int) -> float | None:
     """Smallest exact two-sided sign/rank p-value for this many nonzero pairs."""
 
@@ -391,14 +398,16 @@ def paired_fold_comparison(
 ) -> dict[str, object]:
     """Compare matched outer folds with a two-sided Wilcoxon signed-rank test.
 
-    Pairing requires identical fold IDs and non-identifying test-index digests,
-    plus a shared task, split strategy, test size and class-count manifest.
-    Differences are candidate minus reference. Folds missing an expected class
-    are listed as exclusions, never silently included in a partial metric.
+    Pairing requires identical fold IDs and non-identifying test-index
+    digests, plus a shared task, split strategy, test size and class-count
+    manifest; when both sides report a data snapshot digest, the snapshots
+    must match as well. Differences are candidate minus reference. Folds
+    missing an expected class are listed as exclusions rather than scored on
+    a partial label set.
 
-    This remains exploratory cross-validation evidence, not an independent
-    clinical-sample test: outer folds share training rows and small ``n`` limits
-    p-value resolution.
+    Exploratory cross-validation evidence, not an independent clinical-sample
+    test: outer folds share training rows and small ``n`` limits p-value
+    resolution.
     """
 
     reference, reference_context, reason = _fold_map(reference_folds)
@@ -425,6 +434,17 @@ def paired_fold_comparison(
         return _comparison_payload(
             status="not_comparable",
             reason="fold IDs or test-index digests do not match",
+            metric=metric,
+        )
+    # When both results carry a data snapshot digest, identical fold structure
+    # is no longer sufficient: values must come from the same snapshot too.
+    reference_digests = _data_digests(reference_folds)
+    candidate_digests = _data_digests(candidate_folds)
+    if reference_digests and candidate_digests and reference_digests != candidate_digests:
+        return _comparison_payload(
+            status="not_comparable",
+            reason="data snapshot digests do not match; the two results were "
+            "not produced on the same data",
             metric=metric,
         )
 

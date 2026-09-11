@@ -1,17 +1,25 @@
 """Decision-threshold selection on out-of-fold probabilities.
 
-A raw ``argmax`` assumes the priors are equal and the likelihood ratio is
-balanced.  In this dataset NC and AD differ in age and site composition, so the
-cost of missing AD (sensitivity loss) is not the same as mislabeling a control.
-The competition reports sensitivity and specificity separately, which means the
-operating point matters, not just the ranking.
+**Do not report a fitted threshold's own score as model performance.** The
+search observes every out-of-fold label, so ``ThresholdPolicy.score`` --
+and any metric computed by applying the policy back to the same OOF rows --
+is a same-set selection score, optimistically biased by construction. The
+only unbiased headline numbers in this package are the outer-fold argmax
+``aggregate``/``predictions`` (provenance key ``threshold_evaluation:
+"outer_oof_argmax"``); the ``threshold`` and ``thresholded_selection_metrics``
+report fields are deployment-policy diagnostics, never results.
 
-Thresholds may be fit on out-of-fold probabilities for a final deployment
-policy: each probability was produced by a model that did not see its subject.
-That does not make the policy's own selection score an unbiased evaluation
-metric, because the threshold search still observes all OOF labels.  Evaluation
-code must keep the deployment policy separate from the outer-fold performance
-estimate.
+Why fit thresholds at all? A raw ``argmax`` assumes equal priors and a
+balanced likelihood ratio. NC and AD differ in age and site composition
+here, so missing AD (sensitivity loss) does not cost the same as
+mislabeling a control. The competition reports sensitivity and specificity
+separately, so the operating point matters, not just the ranking.
+
+Fitting on out-of-fold probabilities is legitimate for a *deployment*
+policy: each probability came from a model that did not see its subject,
+so the policy itself can transfer to new data. What cannot transfer is a
+score measured on those same rows. Evaluation code therefore keeps the
+deployment policy separate from the outer-fold performance estimate.
 """
 
 from __future__ import annotations
@@ -29,7 +37,11 @@ GRIDS: dict[str, tuple[float, ...]] = {
 
 @dataclass(frozen=True)
 class ThresholdPolicy:
-    """A fitted decision rule over class probabilities."""
+    """A fitted decision rule over class probabilities.
+
+    ``score`` is the criterion value on the rows this policy was fitted on:
+    a selection-set diagnostic, not an unbiased performance estimate.
+    """
 
     thresholds: tuple[float, ...]
     class_ids: tuple[int, ...]
@@ -118,6 +130,10 @@ def fit_threshold(
     grid value for one class while holding the others fixed, and stops when a
     full pass improves nothing.  The starting point (all offsets 0.5) is the
     plain argmax rule, so the search can only move the score up, never down.
+
+    The returned ``score`` is measured on ``y``/``probabilities`` themselves:
+    this function fits a deployment rule, it does not evaluate one.  Report
+    outer-fold argmax metrics as performance -- never the score returned here.
     """
 
     if criterion not in GRIDS:

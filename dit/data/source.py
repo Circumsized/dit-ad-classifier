@@ -1,19 +1,19 @@
 """Safe retrieval of public data files.
 
-AI4AD data is distributed outside this repository.  When this CLI downloads a
-file it performs a server-side request, so the request target is validated
-before any socket is opened and re-validated on every redirect hop.
+AI4AD data is distributed outside this repository. Downloading a file issues a
+server-side request, so the target is validated before any socket is opened and
+re-validated on every redirect hop.
 
 Policy:
     * only ``http`` and ``https`` schemes;
-    * the host is resolved before the request and **every** resolved address
-      must be a public global address — loopback, private, link-local,
-      reserved, benchmarking, multicast and unspecified ranges are refused;
+    * the host is resolved before the request and every resolved address must
+      be a public global address — loopback, private, link-local, reserved,
+      benchmarking, multicast and unspecified ranges are refused;
     * ``localhost`` and other non-routable hostnames are refused before DNS;
     * redirects to an unsafe target are not followed.
 
-The resolver is injectable so tests can assert the policy without touching the
-network.
+The resolver is injectable so tests can check the policy without network
+access.
 """
 
 from __future__ import annotations
@@ -34,13 +34,14 @@ MAX_REDIRECTS = 5
 DEFAULT_TIMEOUT = 30.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB safety ceiling
 
-# Hostnames that never point at a public address, regardless of DNS answer.
+# Hostnames that do not point at a public address, regardless of DNS answer.
 _NON_ROUTABLE_NAMES = {"localhost", "local", "broadcasthost"}
 _NON_ROUTABLE_SUFFIXES = (".local", ".internal", ".home.arpa", ".corp", ".lan")
 
 # ``ipaddress.is_global`` is True for multicast and for the IETF special-use
-# ranges it does not track, so the flags alone would let 224.0.0.1, 239.255.
-# 255.250 and 192.88.99.1 through.  These networks are blocked explicitly.
+# ranges it does not track, so the flags alone would let 224.0.0.1,
+# 239.255.255.250 and 192.88.99.1 through. These networks are blocked
+# explicitly.
 _REFUSED_NETWORKS = tuple(
     ipaddress.ip_network(item)
     for item in (
@@ -121,8 +122,9 @@ def _split_target(url: str) -> FetchTarget:
 
     host = (parsed.hostname or "").rstrip(".").lower()
     if not host:
-        # urlsplit returns no hostname for an unbracketed IPv6 literal, so this
-        # branch has to tell "no host" from "host written without brackets".
+        # urlsplit returns no hostname for an unbracketed IPv6 literal, so
+        # this branch separates "no host" from "host written without
+        # brackets".
         if ":" in netloc and "[" not in netloc:
             raise UnsafeURL(f"IPv6 literals must be bracketed: {url!r}")
         raise UnsafeURL(f"url has no hostname: {url!r}")
@@ -173,8 +175,8 @@ def resolve_host(host: str, resolver: Resolver | None = None) -> list[ipaddress.
 def validate_url(url: str, *, resolver: Resolver | None = None) -> FetchTarget:
     """Validate ``url`` against the fetch policy and return the target.
 
-    The host is resolved as part of validation so the check covers DNS
-    answers, not just literal addresses.
+    The host is resolved as part of validation, so the check covers DNS
+    answers as well as literal addresses.
     """
 
     target = _split_target(url)
@@ -202,9 +204,9 @@ def _is_global(address: ipaddress._BaseAddress) -> bool:
     """True only for public, globally routable addresses.
 
     Combines the ``ipaddress`` flags with an explicit special-use range list.
-    ``is_global`` alone is not sufficient: it reports multicast and several
-    IETF reserved ranges as global, which would allow a request to
-    224.0.0.1 or 192.88.99.1.
+    ``is_global`` alone is insufficient: it reports multicast and several IETF
+    reserved ranges as global, which would allow a request to 224.0.0.1 or
+    192.88.99.1.
     """
 
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:

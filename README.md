@@ -77,8 +77,9 @@ dit/
 │   └── domain_train.py      训练循环（早停、域对齐、网格搜索）
 └── interpret/               系数重要性与 tract × node 热力图
 configs/                     示例实验配置（YAML 驱动，禁止代码硬编码超参）
+docs/                        用法详解、历史审计路线图、许可证待决事项
 legacy/                      原始课程脚本存档（不可运行，见 _DO_NOT_RUN.md）
-tests/                       389 个测试
+tests/                       443 个测试
 ```
 
 ---
@@ -140,8 +141,14 @@ python -m dit.cli evaluate --synthetic --n-samples 140 --model linear_svm
 `evaluate` 每次只跑一个 `--covariate` 策略，默认是 `feature`。`ablation` 才会把
 三种策略一起跑、一起报告；它们的差距是关于数据的发现，不是 bug。**注意**：
 合成数据的 age 是 `62 + 7 × disease`，age 在这里是标签的因果代理；真实队列里
-age 是混杂因子。所以 `residualize` 在合成数据上分数接近随机、在 AI4AD 上能分离
-白质标志物——解读策略差距时必须知道用的是哪份数据。
+age 是混杂因子。所以 `residualize` 在合成数据上分数接近随机——它的用途是
+**检验模型对人口学信息的依赖**，不是因果去混杂：即便真实队列上残差化改变了
+分数，也不能据此宣称白质标志物已被分离。解读策略差距时必须知道用的是哪份数据。
+
+两个负对照把"信号到底是什么"再往前追问一步（`--control-view demographics`
+或 `--control-view missingness`）：只用 age/sex 建模、或只用每束缺失率建模，
+跑与影像视图完全相同的折、指标和阈值流程。若缺失率负对照接近影像模型的成绩，
+信号更可能是采集/质量伪影而非生物学。
 
 ### 交叉验证策略
 
@@ -165,19 +172,11 @@ python -m dit.cli evaluate --synthetic --n-samples 140 \
     --deep-epochs 120 --deep-batch-size 16 --out reports/deep
 ```
 
-Transformer 直接吃原始 `[N, tract, node, metric]` 张量，不做展平。
-`--alignment` 可选：
-
-- `none` — 纯交叉熵
-- `coral` — 源/目标协方差对齐（CORAL）
-- `mmd` — 多尺度 RBF 最大均值差异
-- `dann` — 梯度反转 + 站点判别器（DANN）
-
-对齐损失按站点配对计算。这里有个容易踩的坑：每个 mini-batch 只有十几个样本，
-摊到 7 个站点上几乎不可能凑出两个"各有两个成员"的站点，**按 batch 计算对齐等于
-什么都没做**。因此对齐统计量是在每个 epoch 的训练行子集上算的，并带预热
-（`alignment_ramp`）让前几个 epoch 先做纯分类。训练摘要里的 `alignment_active`
-字段用来确认对齐确实被施加过——不要只看配置里写了什么。
+Transformer 直接吃原始 `[N, tract, node, metric]` 张量，不做展平。`--alignment`
+可选 `none`（纯交叉熵）、`coral`、`mmd`、`dann`（梯度反转 + 站点判别器）。
+对齐统计量在每个 epoch 的训练行子集上计算而不是按 mini-batch——batch 太小，
+按 batch 配对站点等于什么都没做。训练摘要的 `alignment_active` 字段用来确认
+对齐确实被施加过。预热、配对细节与判别器说明见[用法详解](docs/USAGE.md)。
 
 ### 概率校准
 
@@ -187,33 +186,12 @@ python -m dit.cli evaluate --synthetic --n-samples 140 \
     --deep-epochs 120 --out reports/deep
 ```
 
-带类别权重训练的网络学到的是"把类分开"，不是"报告后验概率"。它的 softmax 会
-系统性偏高或偏低——这对 accuracy 和 AUC 完全不可见，但概率值本身就没法用。
-`--deep-calibration` 提供两种事后校准：
-
-- `temperature` — 拟合一个温度标量，等价于对 logits 做除法（Guo 等 2017 的做法）
-- `sigmoid` — 多分类 Platt 标度，每个类拟合一个二元 logistic
-
-两种都在**早停没用过的那部分留出集**上拟合：留出集会被切成一半做早停、一半做
-校准，因为用选出停止点的同一批行去拟合校准，等于拿自己的答案卡做题。校准不会
-出现在网格候选上——候选只按平衡准确率打分，概率尺度根本用不到。
-
-每折报告里会给出 `calibration`、`calibration_applied`、`temperature` 和
-`temperature_saturated`，用来确认校准真的被施加过。`temperature_saturated`
-标记温度是否撞到了搜索区间的边界——目标函数平坦时搜索会走到墙上，`148.4`
-可能是真实拟合值也可能是被截断的值，光看数字分不出来。
-
-两处不会静默产出的情况：
-
-- 数据太少时每个切片至少需要两行，`search_domain_classifier` 会先检查再开始
-  训练，而不是训练到中途才失败。
-- `sigmoid` 会在拟合后检查它有没有把某个类"喂饱"的置信度抽走。行数守卫是必要
-  但不充分的：一个只有两行的类照样能被拟合，而且拟合出来的映射可能把这个类在自己
-  行上的平均概率从 0.398 压到 0.222，**同时 ECE 从 0.17 降到 0.02**——标准指标
-  反而会奖励这个失败，因为 ECE 按置信度分箱，从不问预测错的是哪一类。所以校准后
-  要求每个类在自己行上保留至少 85% 的原始质量，不满足就报错并建议改用
-  `temperature`。判据是相对降幅而不是支持度：同一个只有两行的类，如果它是真的
-  可分的，保留率约 0.90，照常通过。
+带类别权重训练的网络学到的是"把类分开"，不是"报告后验概率"；softmax 的系统性
+偏高对 accuracy/AUC 不可见，但概率值本身不可用。`--deep-calibration temperature`
+（Guo 等 2017）或 `sigmoid`（多分类 Platt）都在**早停没用过的那部分留出集**上
+拟合。每折报告 `calibration_applied` / `temperature_saturated`，用来确认校准
+真的被施加、温度没有被搜索边界截断。为什么 `sigmoid` 还需要类质量守卫、ECE
+在哪类失败上反而"变好"，见[用法详解](docs/USAGE.md)。
 
 ### 跨模型集成
 
@@ -224,21 +202,12 @@ python -m dit.cli evaluate --synthetic --n-samples 140 \
     --ensemble-weighting inner_score --out reports/ensemble
 ```
 
-`--model ensemble` 不使用单个模型，而是在每个外层折内跑完整套基础阵容（各自带
-嵌套网格搜索），再对 **out-of-fold 概率**做软投票。报告里给出每个基础模型的
-单独分数（`base_model_scores`）和每折的权重（`weights`）。
-
-两点设计取舍：
-
-- **权重按折重算，不做全局加权。** `inner_score` 用每个基础模型在该折内层 CV
-  的平衡准确率做权重——这个数来自同一个外层折内部，所以不构成泄漏。换成
-  全局权重等于假设"哪个模型更有用"这件事跨折不变，而它实际上会变。
-  `--ensemble-weighting equal` 退化为等权平均。
-- **默认阵容不含 Transformer，因为贵，不是因为不对。** 显式写进去是支持的：
-  `--ensemble-models logistic,tract_transformer`。集成发现阵容里有深度模型时会
-  自动给它打开温度校准——软投票平均的是概率，而带类别权重的 Transformer 输出
-  的系统性偏高会让它的票只凭"嗓门大"就压过别人。显式指定 `--deep-calibration`
-  的取值永远不会被覆盖。
+`--model ensemble` 在每个外层折内跑完整套基础阵容（各自带嵌套网格搜索），再对
+out-of-fold 概率做软投票；报告给出每个基础模型的单独分数（`base_model_scores`）
+和每折权重（`weights`）。权重按折由内层 CV 分数决定（来自同一外层折内部，不构成
+泄漏），不做全局加权；默认阵容不含 Transformer（因为贵，不是因为不对），显式
+写进去时集成会自动为深度模型打开温度校准。设计取舍的完整说明见
+[用法详解](docs/USAGE.md)。
 
 ### 消融与解释
 
@@ -248,26 +217,17 @@ python -m dit.cli ablation --synthetic --n-samples 140 --out reports/abl
 python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out reports/interp
 ```
 
-`ablation` 额外产出 `ablation_table.csv`（参数族/视图/协变量/模型一张表）与严格 JSON
-的 `ablation_table.json`。`interpret` 在 profile/metric 视图下输出每束每指标的
-tract×node 热力图，并对左侧 UF 节点 75–100、ATR 1–13、CC 后部 1–10 等文献区间
-给出机器可读的 `literature_hits` 命中/未命中（真实 `fgnames` 才能匹配到解剖名）。
-`evaluate` 每次落盘 `rad_scores.csv`：每受试者的 out-of-fold 疾病概率分数，用于外部
-排序，与 `interpret` 的全量重拟合解释严格分开。
-一条 `matrix` 命令可产出 binary/multiclass × stratified/LOSO 四组报告与
-`matrix_summary.json`。
+`ablation` 产出跨协变量/视图/模型的 `ablation_table.csv|json`，并生成预设的
+`none vs feature`、`residualize vs feature` 外层 fold 对照——Wilcoxon p 值与 Holm
+校正仅作**探索性**摘要（5 个 stratified folds 双侧精确 p 最小只能到 0.0625；
+LOSO 折共享训练数据；不同任务、种子、split manifest，以及 stratified vs LOSO
+从不配对）。`interpret` 在 profile/metric 视图下输出 tract×node 热力图与文献
+区间的 `literature_hits`，**它是在全部有标签样本上重新拟合得到的解释，不是
+精度估计，不能当 accuracy 引用**。`evaluate` 落盘的 `rad_scores.csv`（每受试者
+OOF 疾病概率）与解释严格分开；一条 `matrix` 命令可产出 binary/multiclass ×
+stratified/LOSO 四组报告。完整语义见[用法详解](docs/USAGE.md)。
 
-消融表同时扫协变量策略、特征视图和模型；`--model ensemble` 也能进消融表，
-用来对比"集成"相对单模型在每个协变量策略下的位置。每一组固定模型/视图/划分/
-种子的协变量实验还会生成预设的 `none vs feature` 与 `residualize vs feature` 外层
-fold 对照：主推断指标是平衡准确率，Wilcoxon p 值和 Holm 校正仅作**探索性**摘要。
-5 个 stratified folds 的双侧精确 p 最小只能到 0.0625；LOSO 的折共享训练数据，
-也不应被解读为独立临床试验。不同任务、不同种子、不同 split manifest，以及
-stratified vs LOSO 从不配对。解释输出系数重要性和
-tract × node 热力图。**解释部分是在全部有标签样本上重新拟合模型得到的**，
-它产出的是解释，不是精度估计，不能当 accuracy 来引用。
-
-### 下载
+### 下载与提交闭环
 
 ```bash
 python -m dit.cli fetch --url https://example.org/data.mat --out data.mat
@@ -277,6 +237,21 @@ python -m dit.cli fetch --url https://example.org/data.mat --out data.mat
 http/https、只允许 80/443 端口、拒绝凭据、拒绝本地/回环/私有/链路本地/组播/
 保留/测试网段、拒绝未加括号的 IPv6 字面量，并且**每一次重定向都重新校验**——
 只校验第一个地址是不够的。
+
+交叉验证给出的是"流程好不好"，不是可提交的模型。`fit` / `predict` 补上这一环：
+
+```bash
+python -m dit.cli fit --mat MCAD_AFQ_competition.mat \
+    --task binary --model linear_svm --artifact artifacts/model.joblib
+python -m dit.cli predict --mat MCAD_AFQ_test.mat \
+    --artifact artifacts/model.joblib --out predictions.csv
+```
+
+`fit` 用与评估路径完全相同的管线在**全部有标签行**上重新调参并最终重拟合
+（因此 fit 输出的任何分数都是选择分数，无偏数字只来自交叉验证报告），
+落盘工件带 label_map、特征元数据、配置快照与数据快照摘要；`predict` 用冻结
+的视图设置重建特征矩阵，列契约不符会显式报错而不是静默对齐，输出含逐类
+概率与 argmax 预测的 CSV。深度模型暂不支持部署工件。
 
 ---
 
@@ -307,11 +282,11 @@ http/https、只允许 80/443 端口、拒绝凭据、拒绝本地/回环/私有
 ```bash
 # 完整套件（含 torch 深度测试）
 pip install -e ".[dev,torch]"
-python -m pytest -q          # last verified: 400 passed (2026-09-08)
+python -m pytest -q          # last verified: 443 passed (2026-09-12)
 
 # 仅核心（无 torch）：深度测试自动跳过，核心导入/CLI 契约仍全绿
 pip install -e ".[dev]"
-python -m pytest -q          # last verified: 325 passed, 3 skipped (2026-09-08)
+python -m pytest -q          # last verified: 361 passed, 10 skipped (2026-09-12)
 ```
 
 GitHub Actions 也会分别验证 Python 3.10 的无 torch 核心路径与 Python 3.12 的
@@ -323,3 +298,13 @@ NaN 安全统计量、URL 策略的每一类地址，以及 Transformer 与域�
 域适应模块最初**没有任何调用者**，因此藏了四个缺陷才被发现：训练/验证切分写反、
 判别器宽度不匹配、对齐损失永远不会触发、以及 `fit` 时从不设置随机种子。这些现在
 都有回归测试。
+
+---
+
+## 文档
+
+- [docs/USAGE.md](docs/USAGE.md) — 域适应 Transformer、概率校准、跨模型集成、消融/解释与部署闭环的完整语义
+- [docs/FROZEN_EXPERIMENT_SPEC.md](docs/FROZEN_EXPERIMENT_SPEC.md) — W0 冻结实验规范（双轨目标、class_order、数据边界、候选上限、选择/确认分离）
+- `docs/OPTIMIZATION_PLAN.md` — 历史审计与重写路线图（P0–P6 已全部落地，保留原始缺陷证据）
+- `docs/LICENSE_TODO.md` — 许可证/版权持有者待决事项（所有者决定，不自动生成）
+- `legacy/_DO_NOT_RUN.md` — 原始脚本的缺陷存档（F1–F8）

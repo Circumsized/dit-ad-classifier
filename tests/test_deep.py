@@ -481,7 +481,13 @@ class TestDeepExperiment:
         assert result.aggregate["roc_auc"] is not None
         assert result.aggregate["threshold_criterion"] == "f1"
         fold = result.folds[0]
-        assert fold["best_params"]["epochs"] > 0
+        # The grid tunes the learning rate; the epoch budget comes from the
+        # config, so the report can only show the requested value, never a
+        # hidden grid override.
+        assert "learning_rate" in fold["best_params"]
+        assert "epochs" not in fold["best_params"]
+        assert fold["training"]["epochs_requested"] == 6
+        assert fold["training"]["epochs_run"] <= 6
         assert fold["training"]["alignment"] == alignment
         assert fold["training"]["alignment_active"] is (alignment != "none")
 
@@ -528,7 +534,8 @@ class TestSearch:
             site=bundle.site,
         )
         assert "best_params" in report
-        assert "epochs" in report["best_params"]
+        assert "learning_rate" in report["best_params"]
+        assert "epochs" not in report["best_params"]
         assert len(report["grid"]) == 2
         assert report["tuning_score"] == pytest.approx(
             max(entry["score"] for entry in report["grid"]), abs=1e-9

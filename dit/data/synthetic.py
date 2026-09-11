@@ -18,17 +18,14 @@ def make_synthetic_bundle(
 ) -> DatasetBundle:
     """Generate a small dataset with disease and site effects.
 
-    It is not a scientific simulator.  It exists to exercise parsing,
-    splitting, training and inference without redistributing AI4AD data.
+    This is a pipeline fixture, not a scientific simulator. It exercises
+    parsing, splitting, training, and inference without redistributing AI4AD
+    data.
 
-    Two couplings are deliberate and matter when interpreting results: age is
-    constructed as ``62 + 7 * disease + noise``, so age is a *causal proxy* for
-    the label here rather than the confounder it is in the real cohort.  On
-    this data the ``residualize`` covariate strategy therefore destroys signal
-    and lands near chance, whereas on AI4AD it isolates the white matter
-    biomarker.  Reading the strategy gap requires knowing which dataset is in
-    play.  The site offset is also correlated with class position before the
-    shuffle, which is why plain accuracy saturates quickly.
+    Age is constructed as ``62 + 7 * disease + noise``, making it a label proxy
+    rather than a real-cohort confounder. On this fixture, ``residualize``
+    removes signal and approaches chance. The site offset is also correlated
+    with class position before shuffling, so plain accuracy saturates quickly.
     """
 
     if n_samples < n_sites * n_classes:

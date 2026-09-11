@@ -1,20 +1,19 @@
 """Classical and neural AFQ models.
 
-The deep models need PyTorch, which is an optional extra
-(``pip install -e '.[torch]'``).  Importing this package must not require
-torch: the classical path, the CLI and the config loader all work without it,
-so the torch-dependent names are loaded lazily through ``__getattr__`` and
-raise an actionable error only when actually used.
+The deep models need PyTorch, which is an optional extra. The classical path,
+the CLI and the config loader work without torch, so the torch-dependent names
+are loaded lazily through ``__getattr__`` and raise an actionable error only
+when used.
 """
 
 from importlib import import_module
 from typing import Any
 
-# Accepted domain-alignment values.  Defined here, torch-free, so experiment
-# configuration can validate the flag without importing the training loop.
+# Accepted domain-alignment values. Torch-free, so experiment configuration
+# can validate the flag without importing the training loop.
 ALIGNMENTS: tuple[str, ...] = ("none", "coral", "mmd", "dann")
 
-# name -> (module, attribute).  Every target module imports torch at its top.
+# name -> (module, attribute). Every target module imports torch at its top.
 _LAZY: dict[str, tuple[str, str]] = {
     "DomainAlignedClassifier": ("dit.models.domain_train", "DomainAlignedClassifier"),
     "DomainTrainConfig": ("dit.models.domain_train", "DomainTrainConfig"),
