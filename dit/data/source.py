@@ -9,6 +9,12 @@ Policy:
     * the host is resolved before the request and every resolved address must
       be a public global address — loopback, private, link-local, reserved,
       benchmarking, multicast and unspecified ranges are refused;
+    * the socket connects to a validated address, not to a fresh DNS lookup —
+      validating one resolution and then letting the HTTP client resolve the
+      hostname again would leave the rebinding window OWASP's SSRF guidance
+      calls out (validate-then-connect TOCTOU);
+    * the ``Host`` header, TLS SNI and certificate verification still use the
+      original hostname, so virtual hosting and identity checks are unchanged;
     * ``localhost`` and other non-routable hostnames are refused before DNS;
     * redirects to an unsafe target are not followed.
 
@@ -172,11 +178,15 @@ def resolve_host(host: str, resolver: Resolver | None = None) -> list[ipaddress.
     return infos
 
 
-def validate_url(url: str, *, resolver: Resolver | None = None) -> FetchTarget:
-    """Validate ``url`` against the fetch policy and return the target.
+def _validated_target_and_addresses(
+    url: str, *, resolver: Resolver | None = None
+) -> tuple[FetchTarget, list[ipaddress._BaseAddress]]:
+    """Split, resolve and validate ``url`` in one pass.
 
-    The host is resolved as part of validation, so the check covers DNS
-    answers as well as literal addresses.
+    Keeping the resolution that validation approved and the target together is
+    what lets :func:`safe_request` pin the socket to a validated address; a
+    second, separate lookup would re-open the window this module exists to
+    close.
     """
 
     target = _split_target(url)
@@ -189,7 +199,17 @@ def validate_url(url: str, *, resolver: Resolver | None = None) -> FetchTarget:
             raise UnsafeURL(
                 f"host {target.host!r} resolves to non-public address {address}"
             )
-    return target
+    return target, addresses
+
+
+def validate_url(url: str, *, resolver: Resolver | None = None) -> FetchTarget:
+    """Validate ``url`` against the fetch policy and return the target.
+
+    The host is resolved as part of validation, so the check covers DNS
+    answers as well as literal addresses.
+    """
+
+    return _validated_target_and_addresses(url, resolver=resolver)[0]
 
 
 def _is_ip_literal(host: str) -> bool:
@@ -240,6 +260,29 @@ def _system_resolver(host: str) -> list[ipaddress._BaseAddress]:
     return addresses
 
 
+def _connect_to_validated(
+    addresses: list[str], port: int, timeout: float
+) -> socket.socket:
+    """Open a TCP socket to one of the pre-validated addresses.
+
+    Every address in ``addresses`` already passed :func:`_is_global`, so trying
+    them in turn preserves the pinning guarantee while keeping the old
+    ``getaddrinfo``-style fallback for a multi-homed host whose first address
+    refuses the connection.  The last error is raised when none connects.
+    """
+
+    last_error: OSError | None = None
+    for address in addresses:
+        try:
+            sock = socket.create_connection((address, port), timeout)
+        except OSError as exc:
+            last_error = exc
+            continue
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return sock
+    raise last_error if last_error is not None else OSError("no address to connect to")
+
+
 def safe_request(
     url: str,
     *,
@@ -248,26 +291,68 @@ def safe_request(
     resolver: Resolver | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[bytes, FetchTarget]:
-    """Fetch ``url`` after validating the target and every redirect hop."""
+    """Fetch ``url`` after validating the target and every redirect hop.
+
+    The socket dials only addresses that validation approved (the addresses
+    the injected resolver returned), tried in order, so a DNS answer that
+    flips between validation and connection cannot steer the request into a
+    private network.  The connection classes are built here, subclassing
+    whatever ``http.client`` exposes at call time, so tests can substitute
+    fakes.
+    """
 
     import http.client
     import ssl
 
+    class PinnedHTTPConnection(http.client.HTTPConnection):
+        """Dial a pre-validated address; the hostname stays for the Host header."""
+
+        def __init__(self, host: str, port: int, *, addresses: list[str], **kwargs: object) -> None:
+            super().__init__(host, port, **kwargs)
+            self._pinned_addresses = addresses
+
+        def connect(self) -> None:
+            self.sock = _connect_to_validated(self._pinned_addresses, self.port, self.timeout)
+
+    class PinnedHTTPSConnection(http.client.HTTPSConnection):
+        """TLS variant: SNI and certificate checks stay on the hostname."""
+
+        def __init__(
+            self,
+            host: str,
+            port: int,
+            *,
+            addresses: list[str],
+            context: ssl.SSLContext,
+            **kwargs: object,
+        ) -> None:
+            super().__init__(host, port, context=context, **kwargs)
+            self._pinned_addresses = addresses
+            # Held explicitly so connect() does not depend on the base class
+            # having stashed it — the tests subclass fakes that do not.
+            self._context = context
+
+        def connect(self) -> None:
+            self.sock = _connect_to_validated(self._pinned_addresses, self.port, self.timeout)
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
     current = url
     for hop in range(MAX_REDIRECTS + 1):
-        target = validate_url(current, resolver=resolver)
+        target, addresses = _validated_target_and_addresses(current, resolver=resolver)
+        pinned = [str(address) for address in addresses]
         try:
             connection = (
-                http.client.HTTPSConnection(
+                PinnedHTTPSConnection(
                     target.host,
                     target.port,
+                    addresses=pinned,
                     timeout=timeout,
                     context=ssl.create_default_context(),
                     blocksize=65536,
                 )
                 if target.scheme == "https"
-                else http.client.HTTPConnection(
-                    target.host, target.port, timeout=timeout, blocksize=65536
+                else PinnedHTTPConnection(
+                    target.host, target.port, addresses=pinned, timeout=timeout, blocksize=65536
                 )
             )
         except OSError as exc:
