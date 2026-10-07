@@ -71,6 +71,10 @@ class DomainTrainConfig:
     class_weights: bool = True
     calibration: str = "none"
     seed: int = 42
+    # Opt-in deterministic kernels (plan P0.6). CPU kernels used by this
+    # network all have deterministic implementations; on CUDA some ops raise
+    # instead, so the switch stays opt-in and is reported, never assumed.
+    deterministic: bool = False
 
     def __post_init__(self) -> None:
         if self.alignment not in ALIGNMENTS:
@@ -176,7 +180,7 @@ def _alignment_loss(
             loss = loss + coral_loss(chunks[i], chunks[j])
         elif alignment == "mmd":
             loss = loss + mmd_rbf_loss(chunks[i], chunks[j])
-    return loss / len(pairs), True
+    return strength * loss / len(pairs), True
 
 
 class DomainAlignedClassifier:
@@ -209,6 +213,36 @@ class DomainAlignedClassifier:
         self.class_weights_: list[float] | None = None
 
     def fit(
+        self,
+        profiles: np.ndarray,
+        y: np.ndarray,
+        *,
+        covariates: np.ndarray | None = None,
+        site: np.ndarray | None = None,
+    ) -> "DomainAlignedClassifier":
+        """Fit under the configured determinism, then restore the global flag.
+
+        ``torch.use_deterministic_algorithms`` is process-wide state. When
+        this fit requests deterministic kernels it is flipped on for the fit
+        only and restored even when the fit raises; when it does not, the
+        caller's current state is inherited untouched — forcing the flag off
+        inside fit would clobber a caller that enabled determinism globally.
+        Both the mode and its ``warn_only`` companion are saved and restored:
+        setting one resets the other, so restoring only the boolean would
+        silently clear a caller's ``warn_only=True``.
+        """
+
+        if not self.config.deterministic:
+            return self._fit_impl(profiles, y, covariates=covariates, site=site)
+        previous = bool(torch.are_deterministic_algorithms_enabled())
+        previous_warn_only = bool(torch.is_deterministic_algorithms_warn_only_enabled())
+        torch.use_deterministic_algorithms(True)
+        try:
+            return self._fit_impl(profiles, y, covariates=covariates, site=site)
+        finally:
+            torch.use_deterministic_algorithms(previous, warn_only=previous_warn_only)
+
+    def _fit_impl(
         self,
         profiles: np.ndarray,
         y: np.ndarray,
@@ -330,13 +364,17 @@ class DomainAlignedClassifier:
         parameters = list(self.model.parameters()) + (
             list(self.discriminator.parameters()) if self.discriminator is not None else []
         )
+        total_training_weight = (
+            float(weights[torch.as_tensor(labels[train_local], device=self.device, dtype=torch.long)].sum())
+            if weights is not None
+            else float(train_local.size)
+        )
 
         for epoch in range(self.config.epochs):
             self.model.train()
             order = generator.permutation(train_local)
             optimiser.zero_grad()
             epoch_loss = 0.0
-            batches = 0
             for start in range(0, order.shape[0], self.config.batch_size):
                 index = order[start : start + self.config.batch_size]
                 logits = self.model(
@@ -346,19 +384,24 @@ class DomainAlignedClassifier:
                 )
                 target = torch.as_tensor(labels[index], device=self.device, dtype=torch.long)
                 loss = nn.functional.cross_entropy(logits, target, weight=weights)
-                # Gradients accumulate across the batches below so the alignment
-                # term, which needs several sites at once, can be added before a
-                # single step.
-                loss.backward()
-                epoch_loss += float(loss)
-                batches += 1
+                # Each weighted batch mean has its own class-weight denominator.
+                # Scale it by the batch's share of total training weight so the
+                # accumulated gradient equals the epoch-wide weighted mean.
+                if weights is None:
+                    batch_scale = index.shape[0] / order.shape[0]
+                else:
+                    batch_weight = weights[target].sum()
+                    batch_scale = batch_weight / total_training_weight
+                scaled_loss = batch_scale * loss
+                scaled_loss.backward()
+                epoch_loss += float(scaled_loss)
 
             if grouped:
                 # A mini-batch of a handful of subjects rarely holds two sites
                 # with two members each, so aligning per batch is a no-op.  The
                 # statistic is computed over an epoch-level subsample of the
-                # training rows instead; the ramp keeps the first epochs pure
-                # classification so the features are meaningful when aligned.
+                # training rows instead; the ramp increases alignment strength
+                # gradually from the first epoch.
                 strength = min(1.0, (epoch + 1) / self.config.alignment_ramp)
                 window = order[: min(self.config.alignment_batch, order.shape[0])]
                 if window.shape[0] >= 2:
@@ -384,7 +427,7 @@ class DomainAlignedClassifier:
 
             torch.nn.utils.clip_grad_norm_(parameters, 1.0)
             optimiser.step()
-            history.setdefault("training", []).append(epoch_loss / max(batches, 1))
+            history.setdefault("training", []).append(epoch_loss)
             if no_holdout:
                 continue
 
@@ -543,6 +586,7 @@ class DomainAlignedClassifier:
             "calibration_applied": bool(self.calibration_applied_),
             "temperature": float(self.temperature_),
             "temperature_saturated": bool(self.temperature_saturated_),
+            "deterministic": bool(self.config.deterministic),
             "seed": self.config.seed,
         }
 
@@ -567,6 +611,11 @@ class DomainAlignedClassifier:
         """
 
         if self.config.validation_fraction == 0:
+            if self.config.calibration != "none":
+                raise ValueError(
+                    f"{self.config.calibration} calibration needs at least two held-out "
+                    "rows; increase validation_fraction"
+                )
             return np.arange(labels.shape[0]), np.arange(0, dtype=int), np.arange(0, dtype=int)
         train, held_out = _stratified_holdout(
             labels, self.config.validation_fraction, self.config.seed + 1
@@ -581,6 +630,18 @@ class DomainAlignedClassifier:
         calibration = np.asarray(calibration_rows, dtype=int)
         if train.size < 2 or validation.size < 1:
             raise ValueError("not enough rows to hold out a validation slice")
+        if self.config.calibration != "none":
+            required = 2 if self.config.calibration == "sigmoid" else 1
+            for label in np.unique(labels):
+                positives = int(np.sum(labels[calibration] == label))
+                negatives = calibration.size - positives
+                if positives < required or negatives < required or not np.any(labels[validation] == label):
+                    raise ValueError(
+                        f"{self.config.calibration} calibration lacks held-out support for "
+                        f"class {int(label)}: need at least {required} positive and "
+                        f"{required} negative calibration rows and one validation row; "
+                        "increase validation_fraction or set calibration='none'"
+                    )
         return train, validation, calibration
 
 
@@ -649,6 +710,44 @@ def _relabel(values: np.ndarray) -> np.ndarray:
     )
 
 
+def _site_grouped_holdout(
+    labels: np.ndarray, site: np.ndarray, seed: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Hold out one whole site for candidate selection when any site allows it.
+
+    For a domain-generalisation run, scoring candidates on rows from sites
+    they trained on measures in-distribution fit rather than transfer, which
+    is why the classical path selects hyper-parameters with site-grouped inner
+    folds.  This is the deep path's counterpart: try each site (seeded order)
+    as the validation set and take the first whose validation *and* tuning
+    slices both cover every class — a slice missing a class would make the
+    balanced-accuracy candidate score partial and therefore incomparable.
+    Rows with a negative site id are "site unknown" in the dataset contract;
+    they never form the hold-out and follow the remaining rows into tuning.
+    ``None`` means no site qualifies and the caller falls back to the
+    class-stratified split, recording the fallback in its report.
+    """
+
+    site = np.asarray(site).reshape(-1)
+    known = np.unique(site[site >= 0])
+    if known.size < 2:
+        return None
+    expected = set(np.unique(labels).tolist())
+    generator = np.random.default_rng(seed)
+    generator.shuffle(known)
+    for candidate in known:
+        validation = np.flatnonzero(site == candidate)
+        tuning = np.flatnonzero(site != candidate)
+        if tuning.size < 2 or validation.size < 1:
+            continue
+        if (
+            set(np.unique(labels[validation]).tolist()) == expected
+            and set(np.unique(labels[tuning]).tolist()) == expected
+        ):
+            return tuning, validation
+    return None
+
+
 def search_domain_classifier(
     profiles: np.ndarray,
     y: np.ndarray,
@@ -656,13 +755,18 @@ def search_domain_classifier(
     config: DomainTrainConfig | None = None,
     covariates: np.ndarray | None = None,
     site: np.ndarray | None = None,
+    split_strategy: str | None = None,
     device: str = "cpu",
 ) -> tuple[DomainAlignedClassifier, dict[str, Any]]:
     """Pick between the grid settings on a validation split, then refit.
 
     Returns the winning classifier together with the grid report so the outer
     experiment can publish which setting was chosen, matching the
-    ``best_params`` field of the sklearn path.
+    ``best_params`` field of the sklearn path.  The report's ``inner_cv`` field
+    records how candidates were scored: ``"site_grouped"`` when the outer run
+    is a domain-generalisation split (LOSO-like strategy, mirroring the
+    classical path's ``_inner_cv`` rule) and a whole site could be held out,
+    ``"class_stratified"`` otherwise.
     """
 
     base = config or DomainTrainConfig()
@@ -670,27 +774,36 @@ def search_domain_classifier(
     if profiles.shape[0] != labels.shape[0]:
         raise ValueError("profiles and labels must have the same row count")
     site_values = None if site is None else np.asarray(site).reshape(-1)
+    if base.calibration != "none":
+        DomainAlignedClassifier(base, device=device)._split_indices(labels)
 
-    # Stratified, exactly like the in-fit hold-out: a candidate judged on a
-    # validation slice that misses a class would be scored on a partial
-    # balanced accuracy, and the grid would pick a winner on that noise.
-    tuning, validation = _stratified_holdout(
-        labels, base.validation_fraction, base.seed + 2
+    # Same gating rule as the classical path's _inner_cv: site-grouped inner
+    # selection is a Track-B (LOSO) protocol, so a stratified outer fold keeps
+    # the class-stratified hold-out even when site labels exist.  Mixing the
+    # two would give the deep path a stricter inner criterion than the
+    # classical models on the same track.
+    strategy = (split_strategy or "").lower().replace("-", "_")
+    site_aware = strategy in {"loso", "leave_one_site_out", "group"}
+    site_split = (
+        None
+        if site_values is None or not site_aware
+        else _site_grouped_holdout(labels, site_values, base.seed + 4)
     )
+    if site_split is not None:
+        tuning, validation = site_split
+        inner_cv = "site_grouped"
+    else:
+        # Stratified, exactly like the in-fit hold-out: a candidate judged on a
+        # validation slice that misses a class would be scored on a partial
+        # balanced accuracy, and the grid would pick a winner on that noise.
+        tuning, validation = _stratified_holdout(
+            labels, base.validation_fraction, base.seed + 2
+        )
+        inner_cv = "class_stratified"
     if tuning.size < 2 or validation.size < 1:
         raise ValueError("not enough rows to hold out a validation slice")
     if set(np.unique(labels[validation]).tolist()) != set(np.unique(labels).tolist()):
         raise ValueError("validation slice does not cover every class")
-    # Checked before any network is trained: the winner's own hold-out is split
-    # between early stopping and calibration, so four rows are the smallest
-    # useful amount.
-    if base.calibration != "none" and validation.size < 4:
-        raise ValueError(
-            f"{base.calibration} calibration needs two rows each for the validation and "
-            f"calibration slices, but this fold holds out only {validation.size}; use more data per "
-            f"fold or set calibration='none'"
-        )
-
     candidates: list[tuple[float, dict[str, Any]]] = []
     for overrides in _SEARCH_GRID:
         # The candidate trains on the tuning slice only, and with the hold-out
@@ -719,6 +832,7 @@ def search_domain_classifier(
     winner.fit(profiles, labels, covariates=covariates, site=site_values)
     return winner, {
         "best_params": best_overrides,
+        "inner_cv": inner_cv,
         "tuning_score": float(best_score),
         "epochs_requested": int(base.epochs),
         "grid": [{"params": overrides, "score": float(score)} for score, overrides in candidates],

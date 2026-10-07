@@ -90,6 +90,7 @@ def _fold_table(result) -> list[dict[str, object]]:
         for key in (
             "best_params",
             "tuning_score",
+            "inner_cv",
             "training",
             "alignment_grid",
             "weights",
@@ -99,6 +100,7 @@ def _fold_table(result) -> list[dict[str, object]]:
             "task",
             "split_strategy",
             "test_index_digest",
+            "data_digest",
             "test_class_counts",
             "held_out_site",
             "fold_comparable",

@@ -9,6 +9,8 @@ each one pins behaviour that a silent regression would otherwise paper over.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -80,6 +82,75 @@ class TestDomainPrimitives:
         features = torch.zeros(9, 48)
         logits = discriminator(features, strength=1.0)
         assert logits.shape == (9, 7)
+
+    @pytest.mark.parametrize("alignment", ["coral", "mmd"])
+    @pytest.mark.parametrize("strength", [0.0, 0.25, 1.0])
+    def test_alignment_ramp_scales_statistical_penalties(
+        self, alignment: str, strength: float
+    ) -> None:
+        features = torch.tensor(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 2.0], [3.0, 0.0]],
+            requires_grad=True,
+        )
+        ramped, used = _alignment_loss(
+            alignment, features, [0, 0, 1, 1], None, strength, 1, np.random.default_rng(0)
+        )
+        full, used_full = _alignment_loss(
+            alignment, features, [0, 0, 1, 1], None, 1.0, 1, np.random.default_rng(0)
+        )
+        assert used and used_full
+        assert full.item() > 0
+        assert ramped.item() == pytest.approx(full.item() * strength, rel=1e-6)
+        ramped_gradient = torch.autograd.grad(ramped, features)[0]
+        full_gradient = torch.autograd.grad(full, features)[0]
+        assert torch.allclose(ramped_gradient, strength * full_gradient, atol=1e-6)
+
+
+class TestTrainingObjective:
+    @pytest.mark.parametrize("class_weights", [False, True])
+    @pytest.mark.parametrize("batch_size", [2, 3, 5])
+    def test_fit_matches_global_loss_and_gradient(
+        self, monkeypatch, class_weights: bool, batch_size: int
+    ) -> None:
+        from dit.models import domain_train
+
+        class ConstantLogitModel(torch.nn.Module):
+            def __init__(self, n_classes: int, **kwargs) -> None:
+                super().__init__()
+                self.n_classes = n_classes
+                self.logits = torch.nn.Parameter(torch.tensor([0.2, -0.1]))
+
+            def forward(self, profiles, **kwargs):
+                return self.logits.expand(profiles.shape[0], -1)
+
+        captured = []
+        original_step = torch.optim.AdamW.step
+
+        def capture_step(optimiser, *args, **kwargs):
+            captured.append(optimiser.param_groups[0]["params"][0].grad.detach().clone())
+            return original_step(optimiser, *args, **kwargs)
+
+        monkeypatch.setattr(domain_train, "TractTransformer", ConstantLogitModel)
+        monkeypatch.setattr(torch.optim.AdamW, "step", capture_step)
+        profiles = np.arange(40, dtype=np.float32).reshape(5, 2, 4, 1)
+        labels = np.array([0, 0, 0, 0, 1], dtype=np.int64)
+        fitted = DomainAlignedClassifier(
+            DomainTrainConfig(
+                epochs=1, batch_size=batch_size, validation_fraction=0.0,
+                class_weights=class_weights, seed=1,
+            )
+        ).fit(profiles, labels)
+
+        reference = torch.tensor([0.2, -0.1], requires_grad=True)
+        weights = torch.tensor([0.625, 2.5]) if class_weights else None
+        expected = torch.nn.functional.cross_entropy(
+            reference.expand(5, -1), torch.as_tensor(labels), weight=weights
+        )
+        expected.backward()
+        assert reference.grad.norm().item() < 1.0
+        assert len(captured) == 1
+        assert torch.allclose(captured[0], reference.grad, atol=1e-7)
+        assert fitted.history_["training"] == pytest.approx([expected.item()], rel=1e-6)
 
 
 class TestTractTransformer:
@@ -390,6 +461,31 @@ class TestDomainAlignedClassifier:
 
 
 class TestValidationSplit:
+    @pytest.mark.parametrize("entry_point", ["fit", "search"])
+    @pytest.mark.parametrize(
+        "counts,calibration,fraction",
+        [([10, 10], "sigmoid", 0.15), ([20, 1], "temperature", 0.15),
+         ([20, 20], "temperature", 0.0)],
+    )
+    def test_invalid_calibration_support_is_rejected_before_training(
+        self, monkeypatch, entry_point, counts, calibration, fraction
+    ) -> None:
+        def unexpected_step(*args, **kwargs):
+            pytest.fail("insufficient calibration support reached an optimizer step")
+
+        monkeypatch.setattr(torch.optim.AdamW, "step", unexpected_step)
+        labels = np.repeat([0, 1], counts)
+        profiles = np.zeros((labels.size, 2, 4, 1), dtype=np.float32)
+        config = DomainTrainConfig(
+            epochs=1, batch_size=4, d_model=8, n_layers=1,
+            calibration=calibration, validation_fraction=fraction,
+        )
+        with pytest.raises(ValueError, match="calibration|held-out"):
+            if entry_point == "fit":
+                DomainAlignedClassifier(config).fit(profiles, labels)
+            else:
+                search_domain_classifier(profiles, labels, config=config)
+
     def test_split_is_stratified(self) -> None:
         labels = np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])
         classifier = DomainAlignedClassifier(DomainTrainConfig(validation_fraction=0.25))
@@ -521,6 +617,16 @@ class TestDeepExperiment:
             result = run_experiment(bundle, self._config(split_strategy=strategy))
             assert np.isfinite(result.probabilities).all()
             assert len(result.folds) >= 2
+            for fold in result.folds:
+                if strategy == "stratified":
+                    # Track-A protocol parity: the deep path keeps the
+                    # class-stratified inner hold-out exactly like the
+                    # classical search does on stratified folds.
+                    assert fold["inner_cv"] == "class_stratified"
+                else:
+                    # Either a site-grouped hold-out or the recorded fallback;
+                    # which one depends on each fold's site class coverage.
+                    assert fold["inner_cv"] in {"site_grouped", "class_stratified"}
 
 
 class TestSearch:
@@ -574,6 +680,186 @@ class TestSearch:
                 labels,
                 config=DomainTrainConfig(epochs=1, batch_size=2, patience=1, seed=1),
             )
+
+
+class TestSiteGroupedSelection:
+    def test_holdout_picks_one_whole_site(self) -> None:
+        from dit.models.domain_train import _site_grouped_holdout
+
+        labels = np.array([0, 1, 0, 1, 0, 1, 0, 1])
+        site = np.array([0, 0, 1, 1, 2, 2, 3, 3])
+        split = _site_grouped_holdout(labels, site, seed=0)
+        assert split is not None
+        tuning, validation = split
+        # The candidate is scored on a site it never trained on, mirroring the
+        # outer LOSO question inside the training rows.
+        assert set(site[validation].tolist()) == {site[validation[0]]}
+        assert not (set(tuning.tolist()) & set(validation.tolist()))
+        assert set(tuning.tolist()) | set(validation.tolist()) == set(range(labels.size))
+        assert set(np.unique(labels[validation]).tolist()) == {0, 1}
+        assert set(np.unique(labels[tuning]).tolist()) == {0, 1}
+
+    def test_holdout_is_deterministic_per_seed(self) -> None:
+        from dit.models.domain_train import _site_grouped_holdout
+
+        labels = np.repeat([0, 1], 8)
+        site = np.tile([0, 1, 2, 3], 4)
+        first = _site_grouped_holdout(labels, site, seed=3)
+        second = _site_grouped_holdout(labels, site, seed=3)
+        assert first is not None and second is not None
+        assert np.array_equal(first[0], second[0])
+        assert np.array_equal(first[1], second[1])
+
+    def test_unknown_site_rows_never_form_the_validation(self) -> None:
+        from dit.models.domain_train import _site_grouped_holdout
+
+        labels = np.array([0, 1, 0, 1, 0, 1, 0, 1])
+        site = np.array([0, 0, -1, -1, 1, 1, 2, 2])
+        split = _site_grouped_holdout(labels, site, seed=0)
+        assert split is not None
+        _, validation = split
+        assert np.all(site[validation] >= 0)
+
+    def test_no_qualifying_site_returns_none(self) -> None:
+        # Each site carries a single class, so any site hold-out would leave
+        # the candidate score partial on one side; the caller must fall back.
+        from dit.models.domain_train import _site_grouped_holdout
+
+        labels = np.array([0, 0, 0, 1, 1, 1])
+        site = np.array([0, 0, 0, 1, 1, 1])
+        assert _site_grouped_holdout(labels, site, seed=0) is None
+
+    def test_search_reports_the_selection_scheme(self) -> None:
+        bundle = make_synthetic_bundle(n_samples=70, n_tracts=3, n_points=16, n_metrics=2, seed=5)
+        labels = (bundle.y == 2).astype(int)
+        config = DomainTrainConfig(epochs=6, batch_size=8, patience=3, seed=1)
+        with_site, site_report = search_domain_classifier(
+            bundle.X, labels, config=config, site=bundle.site, split_strategy="loso"
+        )
+        stratified_with_site, stratified_report = search_domain_classifier(
+            bundle.X, labels, config=config, site=bundle.site, split_strategy="stratified"
+        )
+        without_site, plain_report = search_domain_classifier(bundle.X, labels, config=config)
+        # Site-grouped selection is the Track-B (LOSO) protocol: a stratified
+        # outer fold must keep the class-stratified hold-out even when site
+        # labels exist, matching the classical path's _inner_cv rule.  Every
+        # synthetic site holds both classes, so the LOSO case must engage it.
+        assert site_report["inner_cv"] == "site_grouped"
+        assert stratified_report["inner_cv"] == "class_stratified"
+        assert plain_report["inner_cv"] == "class_stratified"
+        assert with_site.predict_proba(bundle.X).shape[1] == 2
+        assert stratified_with_site.predict_proba(bundle.X).shape[1] == 2
+
+    def test_search_falls_back_when_no_site_qualifies(self) -> None:
+        # Two sites, each single-class: on a LOSO run the site-grouped hold-out
+        # is impossible, so the search must use the stratified cut and say so
+        # in the report instead of silently presenting a site-blind choice as
+        # site-aware.
+        labels = np.array([0] * 20 + [1] * 20)
+        site = np.array([0] * 20 + [1] * 20)
+        _, report = search_domain_classifier(
+            np.zeros((labels.size, 2, 4, 1)),
+            labels,
+            config=DomainTrainConfig(epochs=2, batch_size=8, patience=1, seed=1),
+            site=site,
+            split_strategy="loso",
+        )
+        assert report["inner_cv"] == "class_stratified"
+
+
+class TestDeterministicSwitch:
+    """Plan P0.6: the determinism flag is opt-in, reported, and never leaks."""
+
+    def _bundle(self, n_samples: int = 40):
+        bundle = make_synthetic_bundle(
+            n_samples=n_samples, n_tracts=2, n_points=8, n_metrics=2, seed=3
+        )
+        return bundle.X, (bundle.y == 2).astype(int), bundle.site
+
+    def test_fit_restores_the_global_determinism_state(self) -> None:
+        profiles, labels, site = self._bundle()
+        torch.use_deterministic_algorithms(True)
+        try:
+            fitted = DomainAlignedClassifier(SMALL).fit(profiles, labels, site=site)
+            # The fit ran with deterministic=False, so back outside fit() the
+            # caller's True must be in force again.
+            restored = torch.are_deterministic_algorithms_enabled()
+        finally:
+            torch.use_deterministic_algorithms(False)
+        assert fitted.best_validation_score_ is not None
+        assert restored is True
+
+    def test_fit_inherits_the_callers_determinism_when_not_requested(self) -> None:
+        profiles, labels, site = self._bundle()
+        seen: dict[str, bool] = {}
+        original = DomainAlignedClassifier._fit_impl
+
+        def spy(instance, *args, **kwargs):
+            seen["inside"] = torch.are_deterministic_algorithms_enabled()
+            return original(instance, *args, **kwargs)
+
+        # deterministic=False must leave the global flag alone in BOTH
+        # directions: a caller with determinism on must keep it during the
+        # fit, and a caller with it off must not have it silently forced on.
+        torch.use_deterministic_algorithms(True)
+        DomainAlignedClassifier._fit_impl = spy
+        try:
+            DomainAlignedClassifier(SMALL).fit(profiles, labels, site=site)
+            assert seen["inside"] is True
+            torch.use_deterministic_algorithms(False)
+            DomainAlignedClassifier(SMALL).fit(profiles, labels, site=site)
+            assert seen["inside"] is False
+        finally:
+            DomainAlignedClassifier._fit_impl = original
+            torch.use_deterministic_algorithms(False)
+
+    def test_deterministic_fit_is_bitwise_reproducible(self) -> None:
+        profiles, labels, site = self._bundle(50)
+        config = replace(SMALL, deterministic=True)
+        first = DomainAlignedClassifier(config).fit(profiles, labels, site=site)
+        second = DomainAlignedClassifier(config).fit(profiles, labels, site=site)
+        assert first.parameters()["deterministic"] is True
+        assert np.array_equal(
+            first.predict_proba(profiles), second.predict_proba(profiles)
+        )
+
+    def test_the_flag_flows_through_the_experiment_config(self) -> None:
+        from dit.evaluation.experiment import ExperimentConfig, _deep_train_config
+
+        config = ExperimentConfig(deep_deterministic=True)
+        assert config.describe()["deep_deterministic"] is True
+        assert _deep_train_config(config).deterministic is True
+        assert _deep_train_config(ExperimentConfig()).deterministic is False
+
+    def test_fit_restores_the_warn_only_companion_flag(self) -> None:
+        # use_deterministic_algorithms resets warn_only on every call, so
+        # restoring only the boolean would silently clear a caller's
+        # warn_only=True. Both halves of the global state must survive.
+        profiles, labels, site = self._bundle()
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        try:
+            DomainAlignedClassifier(SMALL).fit(profiles, labels, site=site)
+            restored_mode = torch.are_deterministic_algorithms_enabled()
+            restored_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        finally:
+            torch.use_deterministic_algorithms(False)
+        assert restored_mode is True
+        assert restored_warn_only is True
+
+    def test_fit_restores_state_when_the_fit_raises(self) -> None:
+        # The restore lives in a finally block; a fit that fails (here: a
+        # single class) must still put the caller's global state back.
+        profiles, labels, site = self._bundle()
+        torch.use_deterministic_algorithms(True)
+        try:
+            with pytest.raises(ValueError, match="at least two classes"):
+                DomainAlignedClassifier(SMALL).fit(
+                    profiles, np.zeros_like(labels), site=site
+                )
+            restored = torch.are_deterministic_algorithms_enabled()
+        finally:
+            torch.use_deterministic_algorithms(False)
+        assert restored is True
 
 
 class TestAlignmentLoss:

@@ -118,6 +118,9 @@ class ExperimentConfig:
     deep_d_model: int = 64
     deep_layers: int = 3
     device: str = "cpu"
+    # Opt-in deterministic deep-training kernels (plan P0.6); reported, not
+    # assumed — see DomainTrainConfig.deterministic.
+    deep_deterministic: bool = False
     ensemble_models: tuple[str, ...] = DEFAULT_ENSEMBLE_MODELS
     ensemble_weighting: str = "inner_score"
     # The inner search optimises this scorer on estimator.predict(); the outer
@@ -350,6 +353,7 @@ def _deep_train_config(config: ExperimentConfig) -> "DomainTrainConfig":
         patience=config.deep_patience,
         alignment=config.alignment,
         calibration=config.deep_calibration or "none",
+        deterministic=config.deep_deterministic,
         seed=config.seed,
     )
 
@@ -381,6 +385,7 @@ def _fit_deep_fold(
         config=_deep_train_config(config),
         covariates=train_covariates,
         site=train_site,
+        split_strategy=config.split_strategy,
         device=config.device,
     )
     probabilities = align_probabilities(
@@ -390,6 +395,10 @@ def _fit_deep_fold(
     )
     return probabilities, {
         "best_params": search_report["best_params"],
+        # search_domain_classifier always records how candidates were scored;
+        # indexing strictly instead of .get(...) keeps a silently missing
+        # field from masquerading as the stratified default in reports.
+        "inner_cv": search_report["inner_cv"],
         "tuning_score": float(search_report["tuning_score"]),
         "epochs_requested": search_report.get("epochs_requested"),
         "training": classifier.parameters(),
