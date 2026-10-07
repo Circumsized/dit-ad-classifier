@@ -249,6 +249,8 @@ class TestDeploymentClosure:
         assert loaded.best_params == model.best_params
         assert loaded.label_map == model.label_map
         assert loaded.data_digest == model.data_digest
+        # Saving always writes the checksum sidecar loading verifies.
+        assert artifact.with_name(artifact.name + ".sha256").is_file()
 
         unlabeled = DatasetBundle(
             X=bundle.X,
@@ -264,6 +266,102 @@ class TestDeploymentClosure:
         assert np.allclose(probabilities.sum(axis=1), 1.0, atol=1e-6)
         assert np.array_equal(outcome["predictions"], probabilities.argmax(axis=1))
         assert set(outcome["predicted_names"]) <= {"NC", "AD"}
+
+    def test_load_refuses_a_tampered_artifact(self, tmp_path) -> None:
+        from dit.deployment import load_deployment_artifact, save_deployment_artifact
+
+        model = self._fit_model(_bundle(seed=29, n=80))
+        artifact = save_deployment_artifact(model, tmp_path / "model.joblib")
+        payload = bytearray(artifact.read_bytes())
+        payload[len(payload) // 2] ^= 0xFF
+        artifact.write_bytes(bytes(payload))
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            load_deployment_artifact(artifact)
+
+    def test_load_refuses_a_missing_sidecar(self, tmp_path) -> None:
+        from dit.deployment import load_deployment_artifact, save_deployment_artifact
+
+        model = self._fit_model(_bundle(seed=31, n=80))
+        artifact = save_deployment_artifact(model, tmp_path / "model.joblib")
+        artifact.with_name(artifact.name + ".sha256").unlink()
+        # A pickle without its checksum is an unverifiable executable; loading
+        # must refuse rather than fall back to blind unpickling.
+        with pytest.raises(FileNotFoundError, match="sidecar"):
+            load_deployment_artifact(artifact)
+
+    def test_load_refuses_an_empty_sidecar_with_a_clear_error(self, tmp_path) -> None:
+        from dit.deployment import load_deployment_artifact, save_deployment_artifact
+
+        model = self._fit_model(_bundle(seed=32, n=80))
+        artifact = save_deployment_artifact(model, tmp_path / "model.joblib")
+        # A truncated sidecar is still fail-closed, but must not surface as an
+        # IndexError from the parse — it is a checksum error like any other.
+        artifact.with_name(artifact.name + ".sha256").write_text("", encoding="utf-8")
+        with pytest.raises(ValueError, match="sidecar is empty"):
+            load_deployment_artifact(artifact)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("\ufeff", id="utf8-bom-prefix"),
+            pytest.param("中文校验和  model.joblib\n", id="non-ascii-token"),
+            pytest.param("deadbeef  model.joblib\n", id="too-short-digest"),
+        ],
+    )
+    def test_load_refuses_a_malformed_sidecar_with_a_clear_error(
+        self, tmp_path, content: str
+    ) -> None:
+        from dit.deployment import load_deployment_artifact, save_deployment_artifact
+
+        model = self._fit_model(_bundle(seed=33, n=80))
+        artifact = save_deployment_artifact(model, tmp_path / "model.joblib")
+        # hmac.compare_digest raises TypeError on non-ASCII strings, so a BOM
+        # or garbled token must be rejected as malformed up front instead of
+        # surfacing as "comparing strings with non-ASCII characters is not
+        # supported".
+        artifact.with_name(artifact.name + ".sha256").write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError, match="malformed"):
+            load_deployment_artifact(artifact)
+
+    def test_load_refuses_modules_outside_the_allowlist(self, tmp_path) -> None:
+        import datetime
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # A correct sidecar plus a class reference from a non-allowlisted
+        # module: the checksum passes, the unpickler must still refuse the
+        # global before the class can be instantiated.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "stamp": datetime.datetime}
+        )
+        target = tmp_path / "foreign.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(pickle_module.UnpicklingError, match="outside the allowlist"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_builtins_globals(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # ``builtins`` is the most dangerous root imaginable (eval, exec,
+        # open, ...); the allowlist test above only proves a non-listed root
+        # is refused, so pin the canonical one explicitly — a weakened
+        # allowlist that re-admits builtins must fail this test.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "stamp": eval}
+        )
+        target = tmp_path / "builtins.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(pickle_module.UnpicklingError, match="outside the allowlist"):
+            load_deployment_artifact(target)
 
     def test_deep_and_ensemble_and_control_are_refused(self) -> None:
         from dit.deployment import fit_deployment_model

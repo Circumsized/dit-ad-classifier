@@ -17,10 +17,26 @@ evaluated one only in *which rows* it fit on — never in structure:
 
 The deep Transformer is refused here for now: its artifact needs torch
 weights and mask semantics that this classical-first closure does not carry.
+
+Trust boundary: a pickle is executable data. Loading is hardened two ways —
+:class:`_ArtifactUnpickler` only resolves classes from the modules the
+pipeline can legitimately reference, and every save writes a SHA-256 sidecar
+that the load verifies before unpickling. Neither is a security boundary:
+allowlisted roots contain code-executing globals a REDUCE opcode can invoke
+(verified: ``numpy.testing._private.utils.runstring`` executes arbitrary
+Python at load time), and anyone able to write the artifact can recompute the
+unkeyed sidecar. ponytail: module-root allowlist as a raise-the-bar measure;
+upgrade to exact ``(module, name)`` pairs or the skops format (no code
+execution on load) if artifacts must ever be accepted from other parties.
+Treat artifacts like data files and keep them under the same access control
+as the dataset they were fitted on.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import io
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,36 +165,103 @@ def fit_deployment_model(
     )
 
 
+# Module roots a deployment artifact may reference while unpickling: the
+# sklearn pipeline and its numpy/scipy building blocks, the package's own
+# pipeline steps, and the registration helpers pickle itself uses. A global
+# reference outside this list is refused before the class is instantiated,
+# which blocks the "pickle runs arbitrary code" route that a plain
+# ``pickle.load`` leaves open.
+_ALLOWED_MODULE_ROOTS = frozenset({"numpy", "scipy", "sklearn", "dit", "copyreg", "collections"})
+
+
+class _ArtifactUnpickler(pickle.Unpickler):
+    """Unpickler restricted to the modules a fitted pipeline may reference."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module.split(".", 1)[0] not in _ALLOWED_MODULE_ROOTS:
+            raise pickle.UnpicklingError(
+                f"deployment artifact references module {module!r}, which is outside "
+                "the allowlist; the file may be corrupted or malicious"
+            )
+        return super().find_class(module, name)
+
+
+def _digest_path(path: Path) -> Path:
+    return path.with_name(path.name + ".sha256")
+
+
 def save_deployment_artifact(model: DeploymentModel, path: str | Path) -> Path:
-    """Pickle the deployment bundle to ``path`` (parent directories created)."""
+    """Pickle the deployment bundle to ``path`` (parent directories created).
+
+    Also writes a SHA-256 sidecar next to it (``<path>.sha256``); loading
+    refuses any artifact whose sidecar is missing or does not match, so a
+    truncated or swapped file is rejected before it can execute.
+    """
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    payload = pickle.dumps(model.to_dict(), protocol=pickle.HIGHEST_PROTOCOL)
     with target.open("wb") as handle:
-        pickle.dump(model.to_dict(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        handle.write(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
     return target
 
 
 def load_deployment_artifact(path: str | Path) -> DeploymentModel:
-    """Load an artifact written by :func:`save_deployment_artifact`."""
+    """Load an artifact written by :func:`save_deployment_artifact`.
+
+    The checksum sidecar is verified before unpickling and class resolution
+    is confined to :data:`_ALLOWED_MODULE_ROOTS`; loading still trusts whoever
+    produced the file (see the module docstring).
+    """
 
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"deployment artifact not found: {source}")
-    with source.open("rb") as handle:
-        payload = pickle.load(handle)
-    if not isinstance(payload, dict) or payload.get("artifact_version") != ARTIFACT_VERSION:
+    sidecar = _digest_path(source)
+    if not sidecar.is_file():
+        raise FileNotFoundError(
+            f"deployment artifact checksum sidecar not found: {sidecar}; "
+            "artifacts are always saved together with it, so refuse to load "
+            "an unverifiable pickle and re-fit instead"
+        )
+    payload = source.read_bytes()
+    recorded_tokens = sidecar.read_text(encoding="utf-8").split()
+    if not recorded_tokens:
+        raise ValueError(
+            f"deployment artifact checksum sidecar is empty: {sidecar}; "
+            "refuse to load an unverifiable pickle and re-fit instead"
+        )
+    recorded = recorded_tokens[0].strip().lower()
+    # ``hmac.compare_digest`` raises TypeError on non-ASCII input, so a
+    # sidecar written with a BOM or by an editor that mangled the digest must
+    # be rejected here as malformed instead of crashing with an obscure error.
+    if len(recorded) != 64 or any(char not in "0123456789abcdef" for char in recorded):
+        raise ValueError(
+            f"deployment artifact checksum sidecar is malformed: {sidecar.name} must "
+            "start with a 64-character hexadecimal SHA-256 digest; refuse to load an "
+            "unverifiable pickle and re-fit instead"
+        )
+    actual = hashlib.sha256(payload).hexdigest()
+    if not hmac.compare_digest(actual.encode("ascii"), recorded.encode("ascii")):
+        raise ValueError(
+            f"deployment artifact checksum mismatch: {source} does not match {sidecar.name}; "
+            "the file was truncated, modified, or paired with the wrong sidecar"
+        )
+    payload_dict = _ArtifactUnpickler(io.BytesIO(payload)).load()
+    if not isinstance(payload_dict, dict) or payload_dict.get("artifact_version") != ARTIFACT_VERSION:
         raise ValueError(f"{source} is not a version-{ARTIFACT_VERSION} deployment artifact")
-    config_values = dict(payload["config"])
+    config_values = dict(payload_dict["config"])
     config = ExperimentConfig(**config_values)
     return DeploymentModel(
-        pipeline=payload["pipeline"],
+        pipeline=payload_dict["pipeline"],
         config=config,
-        label_map={int(key): str(value) for key, value in payload["label_map"].items()},
-        feature_names=tuple(payload["feature_names"]),
-        data_digest=str(payload["data_digest"]),
-        best_params=dict(payload["best_params"]),
-        classes_=np.asarray(payload["classes"], dtype=int),
+        label_map={int(key): str(value) for key, value in payload_dict["label_map"].items()},
+        feature_names=tuple(payload_dict["feature_names"]),
+        data_digest=str(payload_dict["data_digest"]),
+        best_params=dict(payload_dict["best_params"]),
+        classes_=np.asarray(payload_dict["classes"], dtype=int),
     )
 
 
