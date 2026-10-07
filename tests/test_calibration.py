@@ -116,6 +116,46 @@ def test_apply_matches_the_documented_construction() -> None:
     assert np.allclose(corrected, expected)
 
 
+@pytest.mark.parametrize("positive_probability", [0.0, np.nan, np.inf])
+def test_apply_refuses_invalid_calibrated_mass(positive_probability: float) -> None:
+    class InvalidMap:
+        def predict_proba(self, probabilities):
+            return np.tile([1.0, positive_probability], (probabilities.shape[0], 1))
+
+    expected_message = "calibration map" if not np.isfinite(positive_probability) else "calibrated probabilities"
+    with pytest.raises(ValueError, match=expected_message):
+        apply_platt_scalars(np.full((4, 2), 0.5), [InvalidMap(), InvalidMap()])
+
+
+class _FixedMap:
+    def __init__(self, positive: float):
+        self.positive = positive
+
+    def predict_proba(self, probabilities):
+        return np.column_stack(
+            [np.full(probabilities.shape[0], 1.0 - self.positive),
+             np.full(probabilities.shape[0], self.positive)]
+        )
+
+
+def test_apply_requires_one_map_per_class() -> None:
+    with pytest.raises(ValueError, match="one scalar per probability column"):
+        apply_platt_scalars(np.full((4, 2), 0.5), [_FixedMap(0.5)])
+
+
+def test_apply_rejects_invalid_input_probabilities() -> None:
+    with pytest.raises(ValueError, match="probabilities"):
+        apply_platt_scalars(np.array([[0.8, 0.8], [0.5, 0.5]]), [_FixedMap(0.5), _FixedMap(0.5)])
+
+
+def test_apply_rejects_negative_or_nonfinite_map_output() -> None:
+    for positive in (-0.1, np.nan, np.inf):
+        with pytest.raises(ValueError, match="calibration map"):
+            apply_platt_scalars(
+                np.full((4, 2), 0.5), [_FixedMap(positive), _FixedMap(positive)]
+            )
+
+
 def test_apply_is_deterministic() -> None:
     logits, labels = _true_logits(400, 3, seed=12)
     probabilities = _softmax(logits)
@@ -125,40 +165,46 @@ def test_apply_is_deterministic() -> None:
     )
 
 
-def _uninformative_minority(n_minority: int, *, seed: int = 3, informative: bool = False) -> tuple[np.ndarray, np.ndarray]:
-    """A three-class slice whose last class is drawn from the same cluster."""
+def _separable_minority(n_minority: int, *, seed: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """Valid probabilities with a distinct last-class cluster."""
 
     rng = np.random.default_rng(seed)
-    rows = rng.normal(size=(18 + n_minority, 3)) * 0.1 + 0.4
-    if informative:
-        rows[-n_minority:] = rng.normal(size=(n_minority, 3)) * 0.1 + [0.9, 0.05, 0.05]
-    rows = rows / rows.sum(axis=1, keepdims=True)
-    labels = np.array([0, 1] * (rows.shape[0] // 2), dtype=int)
-    if labels.size < rows.shape[0]:
-        labels = np.concatenate([labels, np.zeros(rows.shape[0] - labels.size, dtype=int)])
-    labels[-n_minority:] = 2
+    rows = rng.dirichlet([10.0] * 3, size=18 + n_minority)
+    rows[-n_minority:] = rng.dirichlet([1.0, 1.0, 30.0], size=n_minority)
+    labels = np.array([0, 1] * 9 + [2] * n_minority, dtype=int)
     return rows, labels
 
 
-class TestPlattMassLoss:
-    """The map must not starve a class of the mass the network gave it."""
-
+class TestCalibrationPosteriors:
     @pytest.mark.parametrize("n_minority", [2, 3, 4])
-    def test_refuses_when_a_rare_class_is_uninformative(self, n_minority: int) -> None:
-        # Measured: class 2's mean probability on its own rows fell 0.398 ->
-        # 0.222 while ece improved 0.17 -> 0.02, so the standard metric rewards
-        # the failure and cannot be used as the check.
-        probabilities, labels = _uninformative_minority(n_minority)
-        with pytest.raises(ValueError, match="reduced class"):
-            fit_platt_scalars(probabilities, labels)
+    def test_constant_scores_recover_class_priors(self, n_minority: int) -> None:
+        labels = np.array([0] * 9 + [1] * 9 + [2] * n_minority)
+        raw = np.tile([0.3, 0.3, 0.4], (labels.size, 1))
+        corrected = apply_platt_scalars(raw, fit_platt_scalars(raw, labels))
+        expected = np.bincount(labels, minlength=3) / labels.size
+        assert corrected == pytest.approx(np.tile(expected, (labels.size, 1)), abs=1e-3)
+
+    def test_accepts_legitimate_overconfidence_correction(self) -> None:
+        raw = np.tile([0.9, 0.1], (200, 1))
+        labels = np.tile([0, 1], 100)
+        scalars = fit_platt_scalars(raw, labels)
+        held_out = np.tile([0.9, 0.1], (40, 1))
+        held_out_labels = np.tile([0, 1], 20)
+        corrected = apply_platt_scalars(held_out, scalars)
+        assert corrected == pytest.approx(np.full((40, 2), 0.5), abs=1e-3)
+        rows = np.arange(held_out_labels.size)
+        raw_nll = -np.log(held_out[rows, held_out_labels]).mean()
+        corrected_nll = -np.log(corrected[rows, held_out_labels]).mean()
+        assert corrected_nll == pytest.approx(np.log(2), abs=1e-3)
+        assert corrected_nll < raw_nll
+        assert expected_calibration_error(held_out_labels, corrected) < 1e-3
 
     @pytest.mark.parametrize("n_minority", [2, 3, 4, 5])
     def test_accepts_a_rare_class_that_is_separable(self, n_minority: int) -> None:
-        # The guard is on the change in mass, not on support size: two rows
-        # that are genuinely distinguishable calibrate fine and must pass.
-        probabilities, labels = _uninformative_minority(n_minority, seed=7, informative=True)
-        scalars = fit_platt_scalars(probabilities, labels)
-        assert len(scalars) == 3
+        probabilities, labels = _separable_minority(n_minority, seed=7)
+        corrected = apply_platt_scalars(probabilities, fit_platt_scalars(probabilities, labels))
+        assert np.isfinite(corrected).all()
+        assert np.allclose(corrected.sum(axis=1), 1.0)
 
     def test_a_well_behaved_fit_is_not_flagged(self) -> None:
         logits, labels = _true_logits(3000, 3, seed=4)
@@ -167,11 +213,32 @@ class TestPlattMassLoss:
 
 
 class TestInputValidation:
+    @pytest.mark.parametrize("labels", [np.array([0, 1, 1, 1]), np.array([0, 0, 0, 1])])
+    def test_platt_requires_two_positive_and_two_negative_rows(self, labels) -> None:
+        probabilities = np.full((labels.size, 2), 0.5)
+        with pytest.raises(ValueError, match="calibration rows"):
+            fit_platt_scalars(probabilities, labels)
+
+    @pytest.mark.parametrize("bad_value", [-0.1, 1.1])
+    def test_platt_refuses_probabilities_outside_unit_interval(self, bad_value: float) -> None:
+        probabilities = np.full((12, 2), 0.5)
+        probabilities[0] = [bad_value, 1.0 - bad_value]
+        with pytest.raises(ValueError, match="probabilities"):
+            fit_platt_scalars(probabilities, np.array([0, 1] * 6))
+
+    def test_platt_refuses_non_normalized_probabilities(self) -> None:
+        with pytest.raises(ValueError, match="probabilities"):
+            fit_platt_scalars(np.full((12, 2), 0.2), np.array([0, 1] * 6))
+
+    def test_platt_refuses_empty_calibration_rows(self) -> None:
+        with pytest.raises(ValueError, match="at least two"):
+            fit_platt_scalars(np.empty((0, 2)), np.empty(0, dtype=int))
+
     def test_platt_refuses_labels_beyond_the_matrix(self) -> None:
         # Two columns, labels naming class 2: previously only two classes were
         # fitted and the rest vanished from the output with no warning.
         probabilities = np.full((10, 2), 0.5)
-        probabilities[0, 0] = 0.9
+        probabilities[0] = [0.9, 0.1]
         with pytest.raises(ValueError, match="must address a class"):
             fit_platt_scalars(probabilities, np.array([0, 1, 2] * 3 + [0]))
 
