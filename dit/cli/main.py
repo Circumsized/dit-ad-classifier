@@ -116,6 +116,14 @@ def _add_experiment_args(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help=(
+            "force deterministic kernels for deep training (plan P0.6); CPU "
+            "kernels used here all support it, some CUDA ops would raise"
+        ),
+    )
+    parser.add_argument(
         "--ensemble-models",
         default=",".join(DEFAULT_ENSEMBLE_MODELS),
         help="comma-separated base lineup for --model ensemble",
@@ -180,6 +188,7 @@ def _config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         deep_d_model=args.deep_d_model,
         deep_layers=args.deep_layers,
         device=args.device,
+        deep_deterministic=getattr(args, "deterministic", False),
         ensemble_models=tuple(
             name.strip() for name in args.ensemble_models.split(",") if name.strip()
         ),

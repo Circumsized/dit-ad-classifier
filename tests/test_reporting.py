@@ -15,6 +15,7 @@ import pytest
 
 from dit.evaluation.experiment import ExperimentConfig, ExperimentResult, run_ensemble
 from dit.evaluation.threshold import ThresholdPolicy
+from dit.evaluation.site_balance import paired_fold_comparison
 from types import SimpleNamespace
 
 from dit.evaluation.reporting import (
@@ -53,8 +54,10 @@ class TestFoldTable:
                     "task": "binary",
                     "split_strategy": "loso",
                     "test_index_digest": "digest-0",
+                    "data_digest": "snapshot-0",
                     "test_class_counts": {"0": 8, "1": 7},
                     "held_out_site": "site-0",
+                    "inner_cv": "site_grouped",
                     "a_dropped_key": "should not appear",
                 }
             ]
@@ -67,12 +70,14 @@ class TestFoldTable:
             "training",
             "best_params",
             "tuning_score",
+            "inner_cv",
             "alignment_grid",
             "confusion_matrix",
             "n_features_used",
             "task",
             "split_strategy",
             "test_index_digest",
+            "data_digest",
             "test_class_counts",
             "held_out_site",
         ):
@@ -121,6 +126,45 @@ def test_ensemble_fold_report_carries_the_deep_bases_calibration(tmp_path) -> No
     assert "threshold" in serialized
     assert serialized["threshold"]["criterion"] == config.threshold_criterion
     assert serialized["thresholded_selection_metrics"]["not_for_performance_comparison"] is True
+
+
+def test_report_round_trip_preserves_data_snapshot_identity() -> None:
+    def fold(data_digest: str, score: float) -> dict[str, object]:
+        return {
+            "fold": "0",
+            "task": "binary",
+            "split_strategy": "stratified",
+            "test_index_digest": "indices-0",
+            "data_digest": data_digest,
+            "test_class_counts": {"0": 4, "1": 4},
+            "n_test": 8,
+            "balanced_accuracy": score,
+            "accuracy": score,
+            "macro_f1": score,
+        }
+
+    class FakeResult:
+        def __init__(self, rows):
+            self.model = "linear_svm"
+            self.task = "binary"
+            self.split_strategy = "stratified"
+            self.feature_view = "summary/none"
+            self.aggregate = {"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5}
+            self.folds = (rows,)
+
+    reference = FakeResult(fold("snapshot-a", 0.5))
+    candidate = FakeResult(fold("snapshot-b", 0.6))
+    payload = assemble_report(
+        [reference, candidate], dataset_summary={}, configuration={}
+    )
+    restored = json.loads(json.dumps(payload, allow_nan=False))
+    saved_reference = restored["results"][0]["folds"]
+    saved_candidate = restored["results"][1]["folds"]
+    assert saved_reference[0]["data_digest"] == "snapshot-a"
+    assert saved_candidate[0]["data_digest"] == "snapshot-b"
+    comparison = paired_fold_comparison(saved_reference, saved_candidate)
+    assert comparison["status"] == "not_comparable"
+    assert "data snapshot" in comparison["reason"]
 
 
 def test_report_uses_explicit_result_policy_without_composite_key() -> None:
