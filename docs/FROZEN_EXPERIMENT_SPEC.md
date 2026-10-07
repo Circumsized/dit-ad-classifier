@@ -16,7 +16,7 @@
 | 轨道 | 问题 | 外层划分 | 内层选择口径 | 主报告指标 |
 |---|---|---|---|---|
 | **A 竞赛复现轨** | 已知站点混合分布下，NC vs AD 能否被区分？ | `--strategy stratified`（站点×诊断联合分层为理想形态；当前实现仅按类别分层，报告必须如实标注 `split_strategy`，不得称为原竞赛划分的严格复现） | 内层 CV，`selection_metric`（默认 balanced_accuracy，报告字段显式声明） | OOF argmax Accuracy（主）、疾病 F1、AUC、敏感度/特异度、每类支持度 |
-| **B 域泛化轨** | 未见过扫描站点时是否仍然有效？ | `--strategy loso` | 源站点内 GroupKFold（经典路径已实现；深度路径的站点感知内层 CV 为 P1-1，未实现前深度 B 轨结果必须标注协议差异） | pooled OOF balanced accuracy、逐站点 BA 与支持度、可比较站点宏均值、最差站点 |
+| **B 域泛化轨** | 未见过扫描站点时是否仍然有效？ | `--strategy loso` | 源站点内 GroupKFold（经典与深度路径均已实现；深度路径在无合格站点组合时回退类别分层，fold 报告 `inner_cv` 字段如实标注所用方案） | pooled OOF balanced accuracy、逐站点 BA 与支持度、可比较站点宏均值、最差站点 |
 
 硬性规则：
 
@@ -137,3 +137,5 @@ prediction_rule:         （predict_proba_argmax；报告 aggregate.prediction_r
 | 日期 | 变更 | 原因 |
 |---|---|---|
 | 2026-09-12 | 初版冻结 | W0 验收：两轨、class_order、数据边界、候选上限、选择/确认分离成文 |
+| 2026-09-12 | 第 1 节 Track B 备注更新：深度路径站点感知内层选择（P1-1）已实现 | 深度 B 轨不再需要「协议差异」标注；无合格站点组合时的回退必须经 `inner_cv` 字段披露，不得静默 |
+| 2026-10-07 | 交叉评审修正：`inner_cv` 字段此前未接入 JSON/Markdown 报告（fold 表键名单遗漏），已修复并加回归测试；README/USAGE 补记深度路径内层选择为单站整留出一次打分，与经典路径 GroupKFold 多折平均在候选分方差上不同 | 文档宣称的披露机制必须真实端到端成立；协议等价性表述不得夸大 |
