@@ -1,24 +1,20 @@
-# LICENSE is unset and needs an owner decision
+# LICENSE status
 
-`pyproject.toml` does not declare a license, and there is no `LICENSE` file.
+The repository owner chose **MIT** on 2026-10-07. A `LICENSE` file with the
+full MIT text now sits at the repository root and `pyproject.toml` declares
+`license = { file = "LICENSE" }`, so metadata and file agree.
 
-This is deliberate. The license and copyright holder are a legal/ownership
-decision that an automated change must not make on the author's behalf. An
-earlier revision declared `license = { text = "MIT" }` in metadata without a
-matching `LICENSE` file, which would misstate the distribution terms.
+## One placeholder still needs the owner
 
-## What the repository owner needs to do
+The `Copyright (c) 2026 <COPYRIGHT-HOLDER-TO-BE-CONFIRMED>` line in `LICENSE`
+is a deliberate placeholder: the copyright holder is an ownership decision
+that an automated change must not invent. Replace it with the real name or
+organisation before publishing.
 
-1. Choose a license (for example MIT, Apache-2.0, BSD-3-Clause, or a
-   proprietary/all-rights-reserved statement).
-2. Add a `LICENSE` file with the full text and the correct copyright holder and
-   year.
-3. Restore the metadata declaration in `pyproject.toml`, e.g.:
+## Provenance note
 
-   ```toml
-   license = { file = "LICENSE" }
-   ```
-
-Until then the code is unlicensed by default, which for others means no granted
-rights to use, copy, or distribute it. Course-assignment provenance and the
-AI4AD data-use terms should be considered when choosing.
+This code originated as a course submission for the AI4AD AFQ Alzheimer's
+classification competition (`docs/OPTIMIZATION_PLAN.md` records that history).
+Choosing MIT does not grant any rights to the AI4AD dataset itself, which is
+distributed separately by its organisers under its own terms; no `.mat` data is
+stored in this repository.

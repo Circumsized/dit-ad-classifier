@@ -28,3 +28,5 @@ dist/
 *.pt
 *.pth
 *.ckpt
+# --- deployment artifacts and their checksum sidecars ---
+artifacts/

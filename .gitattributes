@@ -1,0 +1,18 @@
+# Normalise line endings so a Windows checkout does not rewrite the tree.
+# Tracked files stay LF in the repository; Windows clones check out CRLF.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending translated.
+*.mat binary
+*.npy binary
+*.npz binary
+*.pt binary
+*.pth binary
+*.ckpt binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.whl binary
+
+# Lock files and CI keep whatever the tool writes.
+.github/workflows/*.yml text eol=lf

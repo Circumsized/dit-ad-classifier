@@ -8,9 +8,7 @@ dynamic = ["version"]
 description = "Reproducible AFQ multi-center Alzheimer's disease classification baselines"
 readme = "README.md"
 requires-python = ">=3.10"
-# License intentionally unset: the copyright holder must choose and add a
-# LICENSE file (see docs/LICENSE_TODO.md).  Declaring one here without the file
-# and an owner decision would misstate the distribution terms.
+license = { file = "LICENSE" }
 authors = [{ name = "AI4AD AFQ reproducible baseline" }]
 keywords = ["alzheimer", "dti", "afq", "domain-adaptation", "baseline"]
 classifiers = [
@@ -30,7 +28,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-torch = ["torch>=2.2"]
+# torch>=2.6 is a security floor, not a feature floor: torch.load on <=2.5.1
+# is vulnerable to RCE even with weights_only=True (CVE-2025-32434). This
+# package never calls torch.load, but requiring a patched build costs nothing
+# and keeps dependency scanners honest.
+torch = ["torch>=2.6"]
 dev = ["pytest>=7", "pytest-cov>=4"]
 
 [project.scripts]
