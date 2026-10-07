@@ -100,7 +100,7 @@ pip install -e ".[dev]"         # 加 pytest，运行核心测试
 pip install -e ".[dev,torch]"   # 加 CPU/GPU PyTorch，运行深度模型与完整测试
 ```
 
-当前本地验证组合为 NumPy 1.26.4、scikit-learn 1.9.0、torch 2.5.1+cpu；这不是
+当前本地验证组合为 NumPy 1.26.4、scikit-learn 1.9.0、torch 2.6.0+cpu；这不是
 metadata 的硬钉版。GitHub Actions 分别验证 Python 3.10 的无 torch 核心路径和
 Python 3.12 的 CPU torch 路径。
 
@@ -178,6 +178,23 @@ Transformer 直接吃原始 `[N, tract, node, metric]` 张量，不做展平。`
 按 batch 配对站点等于什么都没做。训练摘要的 `alignment_active` 字段用来确认
 对齐确实被施加过。预热、配对细节与判别器说明见[用法详解](docs/USAGE.md)。
 
+深度路径与经典路径一样做站点感知的内层选择，并采用同一门控规则：**LOSO 折**
+训练行内若能整站留出（留出站与训练站都覆盖每个类别），学习率候选就在未见站点
+上打分；stratified 折与经典路径一致仍用类别分层（站点感知是 B 轨协议，不混入
+A 轨）。找不到合格站点组合时同样回退类别分层，fold 报告的 `inner_cv` 字段
+（`site_grouped` / `class_stratified`）如实记录实际采用的方案——深度 B 轨结果
+因此不再需要「站点感知内层 CV 未实现」的协议差异标注。注意两者并非完全等价：
+深度路径按种子随机顺序取**第一个**合格站点做一次整站留出打分，经典路径是
+GroupKFold 在多个留出站点上平均，候选分的方差不同（合成模拟：每站每类 3 人
+时，真实 BA 差 10 个百分点的选错候选概率单站约 33%、三站平均约 22%——小折
+深度下学习率选择本身就接近随机，`best_params` 不要过度解读），跨路径比较
+选择分时需记住这一点。
+
+`--deterministic` 是深度训练的可选确定性开关（报告 `deterministic` 字段如实
+声明）：仅在请求确定性时改动全局状态并在 fit 返回（或抛出）时恢复原状；未
+请求时完全不动全局状态，继承调用者现状。CPU 算子全部支持，某些 CUDA 算子会
+拒绝，故默认关闭。
+
 ### 概率校准
 
 ```bash
@@ -186,12 +203,13 @@ python -m dit.cli evaluate --synthetic --n-samples 140 \
     --deep-epochs 120 --out reports/deep
 ```
 
-带类别权重训练的网络学到的是"把类分开"，不是"报告后验概率"；softmax 的系统性
-偏高对 accuracy/AUC 不可见，但概率值本身不可用。`--deep-calibration temperature`
-（Guo 等 2017）或 `sigmoid`（多分类 Platt）都在**早停没用过的那部分留出集**上
-拟合。每折报告 `calibration_applied` / `temperature_saturated`，用来确认校准
-真的被施加、温度没有被搜索边界截断。为什么 `sigmoid` 还需要类质量守卫、ECE
-在哪类失败上反而"变好"，见[用法详解](docs/USAGE.md)。
+类别加权交叉熵改变了拟合的后验目标，accuracy/AUC 不足以判断概率是否校准。
+`--deep-calibration temperature` 或 `sigmoid` 都在**早停没用过的那部分留出集**上
+拟合：前者对 logits 除以温度并保留 argmax，后者在完整概率向量上拟合逐类 logistic
+映射并归一化，可能改变预测类别。每折报告 `calibration_applied` / `temperature_saturated`。
+`sigmoid` 验证合法概率及每类至少两个正例、两个负例；不再以保留 85% 原始概率
+作为硬门槛，因为降低过度自信可以是正确校准。小样本局限和外层评估要求见
+[用法详解](docs/USAGE.md)。
 
 ### 跨模型集成
 
@@ -236,7 +254,10 @@ python -m dit.cli fetch --url https://example.org/data.mat --out data.mat
 `fetch` 是本项目唯一开 socket 的地方，所以 URL 策略比一般脚本严格得多：只允许
 http/https、只允许 80/443 端口、拒绝凭据、拒绝本地/回环/私有/链路本地/组播/
 保留/测试网段、拒绝未加括号的 IPv6 字面量，并且**每一次重定向都重新校验**——
-只校验第一个地址是不够的。
+只校验第一个地址是不够的。校验通过的地址还会被**钉扎**：socket 直接拨向已
+校验的 IP，而不是让 HTTP 库再做一次独立解析——两次解析之间 DNS 答案可以被
+重绑定（OWASP SSRF 防护清单点名的 validate-then-connect TOCTOU 窗口）；
+Host 头、TLS SNI 与证书校验仍使用原主机名，虚拟主机路由与身份验证不受影响。
 
 交叉验证给出的是"流程好不好"，不是可提交的模型。`fit` / `predict` 补上这一环：
 
@@ -252,6 +273,16 @@ python -m dit.cli predict --mat MCAD_AFQ_test.mat \
 落盘工件带 label_map、特征元数据、配置快照与数据快照摘要；`predict` 用冻结
 的视图设置重建特征矩阵，列契约不符会显式报错而不是静默对齐，输出含逐类
 概率与 argmax 预测的 CSV。深度模型暂不支持部署工件。
+
+工件是 pickle，即"可执行的数据"，载入侧有两道闸：`fit` 同时写出 SHA-256
+校验文件（`<artifact>.sha256`），`predict` 先验校验和再反序列化，缺文件或不匹配
+一律拒绝；反序列化时类解析只允许 numpy/scipy/sklearn/dit 等管线实际引用的模块
+根。校验和挡的是损坏与错配，白名单挡的是对白名单外模块的直接引用——但它们
+**不构成安全边界**：白名单包内部同样存在可被 pickle REDUCE 调用的代码型全局
+（已实测：`numpy.testing._private.utils.runstring` 可以在载入时执行任意 Python），
+控制了工件与其校验文件的人本来就能重算校验和。因此只载入你自己产出的工件，
+并把它与数据集放在同等访问控制下；需要对抗不可信来源时，换用 skops 这类
+载入时不执行代码的格式。
 
 ---
 
@@ -282,11 +313,11 @@ python -m dit.cli predict --mat MCAD_AFQ_test.mat \
 ```bash
 # 完整套件（含 torch 深度测试）
 pip install -e ".[dev,torch]"
-python -m pytest -q          # last verified: 443 passed (2026-09-12)
+python -m pytest -q          # last verified: 504 passed (2026-10-07, torch 2.6.0+cpu)
 
 # 仅核心（无 torch）：深度测试自动跳过，核心导入/CLI 契约仍全绿
 pip install -e ".[dev]"
-python -m pytest -q          # last verified: 361 passed, 10 skipped (2026-09-12)
+python -m pytest -q          # last verified: 392 passed, 10 skipped (2026-10-07)
 ```
 
 GitHub Actions 也会分别验证 Python 3.10 的无 torch 核心路径与 Python 3.12 的
@@ -306,5 +337,12 @@ NaN 安全统计量、URL 策略的每一类地址，以及 Transformer 与域�
 - [docs/USAGE.md](docs/USAGE.md) — 域适应 Transformer、概率校准、跨模型集成、消融/解释与部署闭环的完整语义
 - [docs/FROZEN_EXPERIMENT_SPEC.md](docs/FROZEN_EXPERIMENT_SPEC.md) — W0 冻结实验规范（双轨目标、class_order、数据边界、候选上限、选择/确认分离）
 - `docs/OPTIMIZATION_PLAN.md` — 历史审计与重写路线图（P0–P6 已全部落地，保留原始缺陷证据）
-- `docs/LICENSE_TODO.md` — 许可证/版权持有者待决事项（所有者决定，不自动生成）
+- `docs/LICENSE_TODO.md` — 许可状态与版权署名待确认项
 - `legacy/_DO_NOT_RUN.md` — 原始脚本的缺陷存档（F1–F8）
+
+---
+
+## 许可
+
+代码以 MIT 发布（见 [LICENSE](LICENSE)）；AI4AD 数据集由其组织方按各自条款单独
+分发，本仓库不含任何 `.mat` 数据。
