@@ -1,13 +1,11 @@
 """Post-hoc probability calibration for the profile Transformer.
 
-A network trained with class-weighted cross-entropy separates the classes but
-does not report the posterior, so its softmax is systematically over- or
-under-confident. Ranking-based metrics such as accuracy and AUC do not detect
-this, so the Transformer's raw probabilities should not be averaged into the
-ensemble alongside already-calibrated models.
+Class weighting changes the posterior targeted by cross-entropy, so raw
+softmax values need calibration before they enter a probability ensemble.
+Accuracy and AUC alone do not establish probability calibration.
 
-Both helpers are fit on rows the network was not tuned on, and both leave the
-class ordering untouched: they change confidence, not the predicted class.
+Both helpers are fit on rows outside training and early stopping. Temperature
+scaling preserves argmax; the one-vs-rest logistic maps can change predictions.
 """
 
 from __future__ import annotations
@@ -38,14 +36,6 @@ def temperature_saturated(value: float) -> bool:
     low = np.exp(TEMPERATURE_LOG_BOUNDS[0] + 1e-6)
     high = np.exp(TEMPERATURE_LOG_BOUNDS[1] - 1e-6)
     return value <= low or value >= high
-
-
-# Share of a class's own mean probability that a Platt map must retain.
-# Relative rather than absolute: a measured degenerate fit retains 0.56 while a
-# legitimate one retains 0.90, whereas in absolute terms the two cases sit at
-# 0.176 and 0.086 and overlap, because the drop scales with the network's
-# initial confidence.
-_PLATT_MASS_RETENTION = 0.85
 
 
 def nll_at_temperature(logits: np.ndarray, labels: np.ndarray, temperature: float) -> float:
@@ -113,17 +103,13 @@ def temperature_scale(logits: np.ndarray, labels: np.ndarray) -> float:
 
 
 def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any]:
-    """Fit one binary logistic on the class probabilities per target class.
+    """Fit one binary logistic map on the probability vector per target class.
 
-    This is the multiclass Platt construction scikit-learn applies inside
-    ``CalibratedClassifierCV``: each estimator maps the raw class-probability
-    vector onto the probability of one class. A class with fewer than two
-    calibration rows cannot be calibrated, so the fit is refused.
-
-    The row-count floor is necessary but not sufficient: with two support rows,
-    a class can still be fitted while losing most of its probability mass.
-    Since ``ece`` bins by confidence without identifying the wrong class, the
-    fitted map is checked against the mass it replaced before being returned.
+    This is a multivariate one-vs-rest map, not a univariate Platt sigmoid.
+    Each class needs two positive and two negative calibration rows. A lower
+    true-class probability can correct overconfidence, so retaining a fixed
+    fraction of the raw probability is not a validity condition. Small-sample
+    generalization still requires validation outside this fitting slice.
     """
 
     from sklearn.linear_model import LogisticRegression
@@ -132,8 +118,16 @@ def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any
     labels = np.asarray(labels, dtype=int).reshape(-1)
     if probabilities.ndim != 2 or probabilities.shape[0] != labels.shape[0]:
         raise ValueError("probabilities and labels must be aligned [N,C] and [N]")
+    if labels.size < 2:
+        raise ValueError("sigmoid calibration needs at least two rows")
+    if probabilities.shape[1] < 2:
+        raise ValueError("probabilities must cover at least two classes")
     if not np.isfinite(probabilities).all():
         raise ValueError("probabilities must be finite")
+    if np.any((probabilities < 0) | (probabilities > 1)) or not np.allclose(
+        probabilities.sum(axis=1), 1.0, rtol=0.0, atol=1e-6
+    ):
+        raise ValueError("probabilities must be in [0,1] and each row must sum to one")
     if np.any(labels < 0) or int(labels.max()) >= probabilities.shape[1]:
         # Without this, a label vector naming a class the matrix lacks is
         # truncated: only ``range(probabilities.shape[1])`` classes get fitted
@@ -143,9 +137,10 @@ def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any
     scalars: list[Any] = []
     for class_index in range(probabilities.shape[1]):
         target = (labels == class_index).astype(int)
-        if target.sum() < 2 or target.sum() == target.size:
+        positives = int(target.sum())
+        if positives < 2 or target.size - positives < 2:
             raise ValueError(
-                f"class {class_index} has {int(target.sum())} of {target.size} "
+                f"class {class_index} has {positives} of {target.size} "
                 "calibration rows; each class needs at least two of each outcome"
             )
         scalars.append(
@@ -154,44 +149,27 @@ def fit_platt_scalars(probabilities: np.ndarray, labels: np.ndarray) -> list[Any
             )
         )
 
-    corrected = apply_platt_scalars(probabilities, scalars)
-    _assert_no_mass_loss(probabilities, corrected, labels)
     return scalars
-
-
-def _assert_no_mass_loss(
-    raw: np.ndarray, corrected: np.ndarray, labels: np.ndarray
-) -> None:
-    """Refuse a Platt map that starves a class of the mass it was given.
-
-    Measured on a 3-class slice where one class held two rows drawn from the
-    same cluster as the others, that class's mean probability on its own rows
-    fell from 0.398 to 0.222 while ``ece`` improved from 0.17 to 0.02. The check
-    uses the change in true-class mass rather than support size, because a class
-    with two rows that is genuinely separable calibrates correctly.
-    """
-
-    for class_index in range(raw.shape[1]):
-        members = labels == class_index
-        before = float(raw[members, class_index].mean())
-        after = float(corrected[members, class_index].mean())
-        if before > 0 and after < before * _PLATT_MASS_RETENTION:
-            raise ValueError(
-                f"Platt calibration reduced class {class_index}'s mean probability on "
-                f"its own rows from {before:.3f} to {after:.3f} "
-                f"({after / before:.0%} retained); the class has too little informative "
-                f"support in the calibration slice, so the map cannot be trusted. "
-                f"Use temperature calibration instead."
-            )
 
 
 def apply_platt_scalars(probabilities: np.ndarray, scalars: list[Any]) -> np.ndarray:
     """Apply fitted Platt scalars and renormalise to a valid row distribution."""
 
     probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.ndim != 2 or probabilities.shape[1] < 2:
+        raise ValueError("probabilities must be a two-dimensional matrix with at least two columns")
+    if not np.isfinite(probabilities).all() or np.any(probabilities < 0) or np.any(probabilities > 1):
+        raise ValueError("probabilities must be finite and in [0, 1]")
+    if not np.allclose(probabilities.sum(axis=1), 1.0, rtol=0.0, atol=1e-6):
+        raise ValueError("probabilities rows must sum to one")
+    if len(scalars) != probabilities.shape[1]:
+        raise ValueError("one scalar per probability column is required")
     corrected = np.zeros_like(probabilities)
     for class_index, scalar in enumerate(scalars):
         corrected[:, class_index] = np.asarray(scalar.predict_proba(probabilities), dtype=float)[:, 1]
-    corrected = np.clip(corrected, 0.0, None)
+    if not np.isfinite(corrected).all() or np.any(corrected < 0):
+        raise ValueError("calibration map must return finite, non-negative probabilities")
     total = corrected.sum(axis=1, keepdims=True)
-    return corrected / np.where(total > 0, total, 1.0)
+    if np.any(~np.isfinite(total)) or np.any(total <= 0):
+        raise ValueError("calibrated probabilities must have finite, positive row mass")
+    return corrected / total
