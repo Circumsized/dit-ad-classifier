@@ -17,5 +17,5 @@ classification competition (`docs/OPTIMIZATION_PLAN.md` records that history).
 Choosing MIT does not grant any rights to the AI4AD dataset itself, which is
 distributed separately by its organisers under its own terms; no `.mat` data is
 stored in this repository. The 2020 code archived under
-`legacy/afq2020_reference/` carries no license of its own; its origin and
-rights are pending the owner's confirmation (see that directory's README).
+`legacy/afq2020_reference/` is the owner's own code (confirmed 2026-10-09),
+so the MIT LICENSE covers it as well.
