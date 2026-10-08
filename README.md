@@ -58,6 +58,7 @@ dit/
 │   ├── preprocessing.py     折内平滑、逐元素中位数插补
 │   ├── covariates.py        age/sex 处理策略 + 折内残差化
 │   ├── selection.py         嵌套的解剖学块/节点选择
+│   ├── sklearn_compat.py    新旧 sklearn 行为差异的兼容层
 │   ├── source.py            带 SSRF 防护的 URL 校验与下载
 │   ├── splits.py            分层 K 折与 Leave-One-Site-Out
 │   ├── mat_loader.py        MATLAB 文件解析
@@ -72,14 +73,17 @@ dit/
 │   └── runner.py            早期精简路径（保留兼容）
 ├── models/
 │   ├── classical.py         5 个 sklearn 模型 + 折内网格搜索
+│   ├── calibration.py       事后概率校准（温度标量 / sigmoid）
 │   ├── tract_transformer.py 形状安全的纤维束 Transformer
 │   ├── domain_adaptation.py CORAL / MMD / 梯度反转判别器
 │   └── domain_train.py      训练循环（早停、域对齐、网格搜索）
+├── deployment.py            fit / predict 工件的写出与载入校验
+├── config.py                YAML 实验配置加载
 └── interpret/               系数重要性与 tract × node 热力图
 configs/                     示例实验配置（YAML 驱动，禁止代码硬编码超参）
 docs/                        用法详解、历史审计路线图、许可证待决事项
 legacy/                      原始课程脚本存档（不可运行，见 _DO_NOT_RUN.md）
-tests/                       443 个测试
+tests/                       504 个测试
 ```
 
 ---
@@ -336,9 +340,9 @@ NaN 安全统计量、URL 策略的每一类地址，以及 Transformer 与域�
 
 - [docs/USAGE.md](docs/USAGE.md) — 域适应 Transformer、概率校准、跨模型集成、消融/解释与部署闭环的完整语义
 - [docs/FROZEN_EXPERIMENT_SPEC.md](docs/FROZEN_EXPERIMENT_SPEC.md) — W0 冻结实验规范（双轨目标、class_order、数据边界、候选上限、选择/确认分离）
-- `docs/OPTIMIZATION_PLAN.md` — 历史审计与重写路线图（P0–P6 已全部落地，保留原始缺陷证据）
-- `docs/LICENSE_TODO.md` — 许可状态与版权署名待确认项
-- `legacy/_DO_NOT_RUN.md` — 原始脚本的缺陷存档（F1–F8）
+- [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md) — 历史审计与重写路线图（P0–P6 已全部落地，保留原始缺陷证据）
+- [docs/LICENSE_TODO.md](docs/LICENSE_TODO.md) — 许可状态与版权署名待确认项
+- [legacy/_DO_NOT_RUN.md](legacy/_DO_NOT_RUN.md) — 原始脚本的缺陷存档（F1–F8）
 
 ---
 
