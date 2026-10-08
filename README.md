@@ -326,11 +326,11 @@ python -m dit.cli predict --mat MCAD_AFQ_test.mat \
 ```bash
 # 完整套件（含 torch 深度测试）
 pip install -e ".[dev,torch]"
-python -m pytest -q          # last verified: 504 passed (2026-10-07, torch 2.6.0+cpu)
+python -m pytest -q          # last verified: 520 passed (2026-10-08, torch 2.6.0+cpu)
 
 # 仅核心（无 torch）：深度测试自动跳过，核心导入/CLI 契约仍全绿
 pip install -e ".[dev]"
-python -m pytest -q          # last verified: 392 passed, 10 skipped (2026-10-07)
+python -m pytest -q          # last verified: 407 passed, 11 skipped (2026-10-08)
 ```
 
 GitHub Actions 也会分别验证 Python 3.10 的无 torch 核心路径与 Python 3.12 的
