@@ -4,17 +4,13 @@ These files are the recovered 2020 upstream codebase that the original course
 submission in the parent directory derives from. Archived verbatim on
 2026-10-08 from a `main`-branch zip download; the timestamps inside the zip
 read 2020-11-30. The zip's comment field embeds the upstream commit
-`bb6bae279167e5b50f12f27c7467b235f7c98e72`; the source repository URL still
-needs the owner's confirmation. Same-origin evidence: `deep_model.Trans` is
+`bb6bae279167e5b50f12f27c7467b235f7c98e72`. The owner confirmed on 2026-10-09
+that this is their own code, so the repository-level MIT LICENSE covers it
+like the rest of the repository. Same-origin evidence: `deep_model.Trans` is
 the earlier variant of `../transformer.py`'s `Trans` class (both pair an
 in-model Softmax with `nn.BCELoss`), and `data_loader_d.py` plays the role of
 the `data_loader.py` that the course scripts import but which was never
 committed.
-
-Copyright notice: these files are archived for historical reference only.
-Archiving them here grants no license to them — they remain the property of
-their original authors. The repository-level MIT LICENSE covers the
-maintained `dit/` code, not this archive.
 
 **Do not run.** Kept as a historical reference only; the maintained pipeline is
 the `dit/` package. Beyond the defects the parent file records for the course
