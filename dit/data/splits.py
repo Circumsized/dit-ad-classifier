@@ -14,6 +14,18 @@ def _validate_labels(y: np.ndarray) -> np.ndarray:
     return values
 
 
+def _validate_site(site: np.ndarray) -> np.ndarray:
+    """Shared site checks: integer-coded labels, -1 for missing, no NaN."""
+    groups = np.asarray(site).reshape(-1)
+    if groups.size == 0:
+        raise ValueError("site cannot be empty")
+    if groups.dtype.kind in "fc" and bool(np.isnan(groups).any()):
+        raise ValueError("site contains NaN/missing values; sites must be integer-coded")
+    if np.any(groups == -1):
+        raise ValueError("site contains -1/missing values; cannot split by site")
+    return groups
+
+
 def stratified_kfold_indices(
     y: np.ndarray, n_splits: int = 5, seed: int = 42
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
@@ -51,11 +63,7 @@ def stratified_kfold_indices(
 def leave_one_site_out(site: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray, object]]:
     """Yield train/test indices for each site, sorted for stable reports."""
 
-    groups = np.asarray(site).reshape(-1)
-    if groups.size == 0:
-        raise ValueError("site cannot be empty")
-    if np.any(groups == -1):
-        raise ValueError("site contains -1/missing values; cannot perform LOSO")
+    groups = _validate_site(site)
     all_indices = np.arange(groups.shape[0])
     for held_out in sorted(np.unique(groups).tolist(), key=str):
         test = np.flatnonzero(groups == held_out)
@@ -79,13 +87,9 @@ def site_stratified_kfold_indices(
     contract.
     """
 
-    groups = np.asarray(site).reshape(-1)
-    if groups.size == 0:
-        raise ValueError("site cannot be empty")
+    groups = _validate_site(site)
     if n_splits < 2:
         raise ValueError("n_splits must be >= 2")
-    if np.any(groups == -1):
-        raise ValueError("site contains -1/missing values; cannot stratify by site")
 
     values = np.unique(groups)
     if values.size == 1:

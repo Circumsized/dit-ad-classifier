@@ -110,6 +110,12 @@ class TestLeaveOneSiteOut:
         with pytest.raises(ValueError, match="-1/missing"):
             list(leave_one_site_out(np.array([0, 0, -1, 1])))
 
+    def test_nan_sites_raise(self) -> None:
+        # Float sites are outside the data contract; they must fail here,
+        # not vanish from every held-out fold and die in OOF accounting.
+        with pytest.raises(ValueError, match="NaN/missing"):
+            list(leave_one_site_out(np.array([0.0, np.nan, 1.0])))
+
     def test_empty_sites_raise(self) -> None:
         with pytest.raises(ValueError, match="site cannot be empty"):
             list(leave_one_site_out(np.array([])))
@@ -193,6 +199,10 @@ class TestSiteStratifiedKfold:
     def test_missing_sites_raise(self) -> None:
         with pytest.raises(ValueError, match="-1/missing"):
             list(site_stratified_kfold_indices(np.array([0, 0, -1, 1])))
+
+    def test_nan_sites_raise(self) -> None:
+        with pytest.raises(ValueError, match="NaN/missing"):
+            list(site_stratified_kfold_indices(np.array([0.0, 0.0, np.nan, 1.0])))
 
     def test_single_site_raises(self) -> None:
         """With one site there is nothing to balance; the caller must notice."""

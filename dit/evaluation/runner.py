@@ -124,6 +124,7 @@ def evaluate_classical(
                 "fold": str(fold_id),
                 "n_train": int(train_idx.size),
                 "n_test": int(test_idx.size),
+                "inner_cv": "site_grouped" if groups is not None else "class_stratified",
                 "best_params": search.best_params_,
                 "inner_best_score": float(search.best_score_),
                 **provenance,
@@ -219,6 +220,7 @@ def evaluate_metric_ensemble(
                 "fold": str(fold_id),
                 "n_train": int(train_idx.size),
                 "n_test": int(test_idx.size),
+                "inner_cv": "site_grouped" if groups is not None else "class_stratified",
                 "best_params": best_params,
                 **provenance,
             }

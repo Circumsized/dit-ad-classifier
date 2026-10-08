@@ -17,8 +17,10 @@ def _assert_manifest(folds, *, strategy: str) -> None:
         assert sum(fold["test_class_counts"].values()) == fold["n_test"]
         if strategy == "loso":
             assert fold["held_out_site"] == fold["fold"]
+            assert fold["inner_cv"] == "site_grouped"
         else:
             assert "held_out_site" not in fold
+            assert fold["inner_cv"] == "class_stratified"
 
 
 def test_classical_runner_emits_stratified_fold_manifest() -> None:

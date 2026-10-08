@@ -795,7 +795,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except ValueError as exc:
+        # User-input contract violations (bad split counts, uncovered
+        # site/class combinations, ...) print one actionable line instead
+        # of a traceback.
+        raise SystemExit(f"error: {exc}") from exc
 
 
 if __name__ == "__main__":
