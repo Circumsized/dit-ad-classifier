@@ -130,7 +130,6 @@ prediction_rule:         （predict_proba_argmax；报告 aggregate.prediction_r
 - 官方提交模板与评分器的 F-score 平均方式；二分类对象筛选口径。
 - 可用 CPU/GPU 与 fit/epoch 预算（本文件不假定硬件）。
 - 主优化目标取竞赛 Accuracy 还是未知站点 BA（两轨都报告，但需声明主目标）。
-- LICENSE/版权持有者（`docs/LICENSE_TODO.md`，所有者决定，不自动生成）。
 
 ## 变更记录
 
@@ -139,3 +138,5 @@ prediction_rule:         （predict_proba_argmax；报告 aggregate.prediction_r
 | 2026-09-12 | 初版冻结 | W0 验收：两轨、class_order、数据边界、候选上限、选择/确认分离成文 |
 | 2026-09-12 | 第 1 节 Track B 备注更新：深度路径站点感知内层选择（P1-1）已实现 | 深度 B 轨不再需要「协议差异」标注；无合格站点组合时的回退必须经 `inner_cv` 字段披露，不得静默 |
 | 2026-10-07 | 交叉评审修正：`inner_cv` 字段此前未接入 JSON/Markdown 报告（fold 表键名单遗漏），已修复并加回归测试；README/USAGE 补记深度路径内层选择为单站整留出一次打分，与经典路径 GroupKFold 多折平均在候选分方差上不同 | 文档宣称的披露机制必须真实端到端成立；协议等价性表述不得夸大 |
+| 2026-10-08 | §8 移除 LICENSE/版权持有者开放项 | 所有者已确认 MIT 署名 Circumsized（`docs/LICENSE_TODO.md`），不再是阻断项 |
+| 2026-10-08 | 登记第三种划分口径 `site_stratified`（站点分层 K 折，`evaluate`/`ablation` 可用）：估计目标与 A 轨相同（每折训练集仍含全部站点），仅平衡各折站点构成；列为稳健性/开发探索口径，不进 A/B 主表、不占第 4 节运行预算、不与任何其他口径配对比较 | 协议扩展须按本规范登记，防止正式双轨与探索口径混淆 |

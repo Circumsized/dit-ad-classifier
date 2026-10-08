@@ -613,20 +613,20 @@ class TestDeepExperiment:
         bundle = make_synthetic_bundle(
             n_samples=70, n_tracts=3, n_points=16, n_metrics=2, seed=8
         )
-        for strategy in ("stratified", "loso"):
+        for strategy in ("stratified", "loso", "site_stratified"):
             result = run_experiment(bundle, self._config(split_strategy=strategy))
             assert np.isfinite(result.probabilities).all()
             assert len(result.folds) >= 2
             for fold in result.folds:
-                if strategy == "stratified":
+                if strategy == "loso":
+                    # Either a site-grouped hold-out or the recorded fallback;
+                    # which one depends on each fold's site class coverage.
+                    assert fold["inner_cv"] in {"site_grouped", "class_stratified"}
+                else:
                     # Track-A protocol parity: the deep path keeps the
                     # class-stratified inner hold-out exactly like the
                     # classical search does on stratified folds.
                     assert fold["inner_cv"] == "class_stratified"
-                else:
-                    # Either a site-grouped hold-out or the recorded fallback;
-                    # which one depends on each fold's site class coverage.
-                    assert fold["inner_cv"] in {"site_grouped", "class_stratified"}
 
 
 class TestSearch:
@@ -740,15 +740,20 @@ class TestSiteGroupedSelection:
             bundle.X, labels, config=config, site=bundle.site, split_strategy="stratified"
         )
         without_site, plain_report = search_domain_classifier(bundle.X, labels, config=config)
-        # Site-grouped selection is the Track-B (LOSO) protocol: a stratified
-        # outer fold must keep the class-stratified hold-out even when site
-        # labels exist, matching the classical path's _inner_cv rule.  Every
-        # synthetic site holds both classes, so the LOSO case must engage it.
+        site_stratified, ss_report = search_domain_classifier(
+            bundle.X, labels, config=config, site=bundle.site, split_strategy="site_stratified"
+        )
+        # Site-grouped selection is the Track-B (LOSO) protocol: stratified and
+        # site-stratified outer folds must keep the class-stratified hold-out
+        # even when site labels exist, matching the classical path's _inner_cv
+        # rule.  Every synthetic site holds both classes, so LOSO engages it.
         assert site_report["inner_cv"] == "site_grouped"
         assert stratified_report["inner_cv"] == "class_stratified"
         assert plain_report["inner_cv"] == "class_stratified"
+        assert ss_report["inner_cv"] == "class_stratified"
         assert with_site.predict_proba(bundle.X).shape[1] == 2
         assert stratified_with_site.predict_proba(bundle.X).shape[1] == 2
+        assert site_stratified.predict_proba(bundle.X).shape[1] == 2
 
     def test_search_falls_back_when_no_site_qualifies(self) -> None:
         # Two sites, each single-class: on a LOSO run the site-grouped hold-out

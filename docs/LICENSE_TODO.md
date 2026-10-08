@@ -16,4 +16,6 @@ This code originated as a course submission for the AI4AD AFQ Alzheimer's
 classification competition (`docs/OPTIMIZATION_PLAN.md` records that history).
 Choosing MIT does not grant any rights to the AI4AD dataset itself, which is
 distributed separately by its organisers under its own terms; no `.mat` data is
-stored in this repository.
+stored in this repository. The 2020 code archived under
+`legacy/afq2020_reference/` carries no license of its own; its origin and
+rights are pending the owner's confirmation (see that directory's README).

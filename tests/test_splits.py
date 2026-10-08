@@ -120,6 +120,13 @@ class TestLeaveOneSiteOut:
 
 
 class TestSiteStratifiedKfold:
+    """Invariants only, no golden membership.
+
+    Like TestStratifiedKfold, these pin the contract (disjoint/exhaustive,
+    site coverage, balance, determinism) but deliberately do not pin exact
+    fold membership, which would couple the tests to numpy's RNG stream.
+    """
+
     def test_disjoint_and_exhaustive(self) -> None:
         site = np.array([0] * 30 + [1] * 30 + [2] * 30)
         folds = list(site_stratified_kfold_indices(site, 5, seed=1))
@@ -127,6 +134,7 @@ class TestSiteStratifiedKfold:
         seen: list[int] = []
         for train, test in folds:
             assert np.intersect1d(train, test).size == 0, "fold overlap"
+            assert train.size + test.size == site.size, "train must be the exact complement"
             seen.extend(test.tolist())
         assert sorted(seen) == list(range(site.size)), "every subject must be tested once"
 
@@ -135,11 +143,23 @@ class TestSiteStratifiedKfold:
         for _, test in site_stratified_kfold_indices(site, 5, seed=1):
             assert set(site[test].tolist()) == {0, 1, 2}
 
-    def test_site_proportions_are_balanced(self) -> None:
+    def test_site_proportions_are_preserved(self) -> None:
         site = np.array([0] * 40 + [1] * 20)
         for _, test in site_stratified_kfold_indices(site, 5, seed=2):
+            assert np.bincount(site[test], minlength=2).tolist() == [8, 4]
+
+    def test_remainders_are_dealt_round_robin(self) -> None:
+        """Leftovers spread one per fold, never piled into the last fold."""
+
+        site = np.array([0] * 22 + [1] * 13)
+        per_site: list[list[int]] = []
+        for _, test in site_stratified_kfold_indices(site, 5, seed=1):
             counts = np.bincount(site[test], minlength=2)
-            assert counts[0] in (8, 9) and counts[1] in (4, 5)
+            assert counts[0] >= 1 and counts[1] >= 1
+            per_site.append(counts.tolist())
+        for site_id in (0, 1):
+            sizes = [row[site_id] for row in per_site]
+            assert max(sizes) - min(sizes) <= 1, sizes
 
     def test_is_deterministic_for_a_seed(self) -> None:
         site = np.array([0] * 25 + [1] * 25 + [2] * 25)
@@ -155,13 +175,30 @@ class TestSiteStratifiedKfold:
             list(site_stratified_kfold_indices(np.zeros(10, dtype=int), n_splits))
 
     def test_split_count_cannot_exceed_smallest_site(self) -> None:
+        """A fold with no subject from some site is not site-stratified."""
+
         site = np.array([0] * 3 + [1] * 20)
         with pytest.raises(ValueError, match="smallest site count"):
             list(site_stratified_kfold_indices(site, 5, seed=1))
 
+    def test_split_count_may_equal_the_smallest_site(self) -> None:
+        """n_splits == smallest site count is the maximum legal value, not an error."""
+
+        site = np.array([0] * 5 + [1] * 5 + [2] * 5)
+        folds = list(site_stratified_kfold_indices(site, 5, seed=1))
+        assert len(folds) == 5
+        for _, test in folds:
+            assert np.bincount(site[test], minlength=3).tolist() == [1, 1, 1]
+
     def test_missing_sites_raise(self) -> None:
         with pytest.raises(ValueError, match="-1/missing"):
             list(site_stratified_kfold_indices(np.array([0, 0, -1, 1])))
+
+    def test_single_site_raises(self) -> None:
+        """With one site there is nothing to balance; the caller must notice."""
+
+        with pytest.raises(ValueError, match="at least two sites"):
+            list(site_stratified_kfold_indices(np.array([0] * 20), 5, seed=1))
 
     def test_empty_sites_raise(self) -> None:
         with pytest.raises(ValueError, match="site cannot be empty"):
@@ -201,6 +238,21 @@ class TestUnifiedSplitInterface:
         folds = list(split_indices(y, site, strategy="site_stratified", n_splits=4, seed=1))
         assert len(folds) == 4
         assert [int(f[2]) for f in folds] == [0, 1, 2, 3]
+
+    def test_site_stratified_strategy_matches_the_direct_splitter(self) -> None:
+        """The unified interface must route to the site splitter, not the label one."""
+
+        site = np.array([0] * 20 + [1] * 20)
+        y = np.array([0, 1] * 20)
+        via_interface = [
+            (tuple(train.tolist()), tuple(test.tolist()))
+            for train, test, _ in split_indices(y, site, strategy="site_stratified", n_splits=4, seed=1)
+        ]
+        direct = [
+            (tuple(train.tolist()), tuple(test.tolist()))
+            for train, test in site_stratified_kfold_indices(site, 4, seed=1)
+        ]
+        assert via_interface == direct
 
     def test_site_stratified_requires_site_metadata(self) -> None:
         with pytest.raises(ValueError, match="site metadata is required"):

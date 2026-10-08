@@ -51,7 +51,7 @@ Softmax 与 BCELoss 冲突等致命缺陷见 `legacy/_DO_NOT_RUN.md` 与
 
 ```
 dit/
-├── cli/main.py              命令行入口（evaluate / ablation / interpret / fetch / info）
+├── cli/main.py              命令行入口（evaluate / matrix / ablation / interpret / fit / predict / fetch / info）
 ├── data/
 │   ├── schema.py            DatasetBundle：形状、标签、元数据的显式契约
 │   ├── layout.py            FeatureLayout：每一列是谁、哪几列是解剖学特征
@@ -81,9 +81,9 @@ dit/
 ├── config.py                YAML 实验配置加载
 └── interpret/               系数重要性与 tract × node 热力图
 configs/                     示例实验配置（YAML 驱动，禁止代码硬编码超参）
-docs/                        用法详解、历史审计路线图、许可证待决事项
-legacy/                      原始课程脚本存档（不可运行，见 _DO_NOT_RUN.md）
-tests/                       516 个测试
+docs/                        用法详解、历史审计路线图、许可与署名记录
+legacy/                      原始课程脚本与 2020 上游代码存档（不可运行，见 _DO_NOT_RUN.md）
+tests/                       520 个测试
 ```
 
 ---
@@ -157,9 +157,15 @@ age 是混杂因子。所以 `residualize` 在合成数据上分数接近随机�
 ### 交叉验证策略
 
 - `--strategy stratified`：分层 K 折，样本充足时的常规口径。
-- `--strategy site_stratified`：站点分层 K 折——每折从每个站点按比例抽取，站点
-  构成在各折间保持均衡（介于 stratified 与 LOSO 之间的第三种口径，协议移植自
-  2020 年上游代码，已改为固定种子可复现）。
+- `--strategy site_stratified`：站点分层 K 折——每折从每个站点按比例抽取，各折
+  站点构成保持均衡。估计目标与 stratified 相同（每折训练集仍包含全部站点，不
+  检验"未见站点"泛化），三种口径的结果互不可比；折内不保证类别均衡，缺类折
+  照常标记 `fold_comparable=False` 并被排除出折宏均值与配对比较；`n_splits`
+  不得超过最小站点的样本数。协议移植自 2020 年上游代码
+  （`legacy/afq2020_reference/`），已改为固定种子、余数轮转分配（与存档索引
+  列表的折结构不同）。外层折划分只影响 `evaluate` 与 `ablation`；
+  `interpret`/`fit` 在全量数据上工作，接受但不使用该值。按冻结规范登记为
+  稳健性/开发探索口径，不进 A/B 主表。
 - `--strategy loso`：Leave-One-Site-Out，7 折分别留出 7 个扫描站点，用来测站点
   间泛化。LOSO 每折只有一批观测，所以报告附站点构成表和站点内指标，否则低分
   可能只是某一个不均衡站点造成的。
@@ -244,9 +250,9 @@ python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out 
 
 `ablation` 产出跨协变量/视图/模型的 `ablation_table.csv|json`，并生成预设的
 `none vs feature`、`residualize vs feature` 外层 fold 对照——Wilcoxon p 值与 Holm
-校正仅作**探索性**摘要（5 个 stratified folds 双侧精确 p 最小只能到 0.0625；
-LOSO 折共享训练数据；不同任务、种子、split manifest，以及 stratified vs LOSO
-从不配对）。`interpret` 在 profile/metric 视图下输出 tract×node 热力图与文献
+校正仅作**探索性**摘要（默认 5 折的 K 折口径（stratified / site_stratified）
+双侧精确 p 最小只能到 0.0625；LOSO 折共享训练数据；不同任务、种子、
+split manifest，以及不同划分策略之间从不配对）。`interpret` 在 profile/metric 视图下输出 tract×node 热力图与文献
 区间的 `literature_hits`，**它是在全部有标签样本上重新拟合得到的解释，不是
 精度估计，不能当 accuracy 引用**。`evaluate` 落盘的 `rad_scores.csv`（每受试者
 OOF 疾病概率）与解释严格分开；一条 `matrix` 命令可产出 binary/multiclass ×

@@ -7,7 +7,7 @@
 experiment:
   model: linear_svm
   task: binary
-  split_strategy: stratified   # stratified | loso
+  split_strategy: stratified   # stratified | loso | site_stratified
   feature_view: summary        # summary | profile | FA/MD/...
   covariate_strategy: feature  # none | feature | residualize
   smooth_window: 5

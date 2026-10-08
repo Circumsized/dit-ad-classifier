@@ -218,9 +218,9 @@ tract×node 热力图，并对左侧 UF 节点 75–100、ATR 1–13、CC 后部
 用来对比"集成"相对单模型在每个协变量策略下的位置。每一组固定模型/视图/划分/
 种子的协变量实验还会生成预设的 `none vs feature` 与 `residualize vs feature` 外层
 fold 对照：主推断指标是平衡准确率，Wilcoxon p 值和 Holm 校正仅作**探索性**摘要。
-5 个 stratified folds 的双侧精确 p 最小只能到 0.0625；LOSO 的折共享训练数据，
-也不应被解读为独立临床试验。不同任务、不同种子、不同 split manifest，以及
-stratified vs LOSO 从不配对。
+默认 5 折的 K 折口径（stratified / site_stratified）双侧精确 p 最小只能到
+0.0625；LOSO 的折共享训练数据，也不应被解读为独立临床试验。不同任务、不同
+种子、不同 split manifest，以及不同划分策略之间从不配对。
 
 **解释部分是在全部有标签样本上重新拟合模型得到的**：它产出的是解释，不是精度
 估计，不能当 accuracy 来引用。
