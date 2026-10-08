@@ -60,7 +60,7 @@ dit/
 │   ├── selection.py         嵌套的解剖学块/节点选择
 │   ├── sklearn_compat.py    新旧 sklearn 行为差异的兼容层
 │   ├── source.py            带 SSRF 防护的 URL 校验与下载
-│   ├── splits.py            分层 K 折与 Leave-One-Site-Out
+│   ├── splits.py            分层/站点分层 K 折与 Leave-One-Site-Out
 │   ├── mat_loader.py        MATLAB 文件解析
 │   └── synthetic.py         确定性合成数据（不依赖真实数据即可跑通全流程）
 ├── evaluation/
@@ -83,7 +83,7 @@ dit/
 configs/                     示例实验配置（YAML 驱动，禁止代码硬编码超参）
 docs/                        用法详解、历史审计路线图、许可证待决事项
 legacy/                      原始课程脚本存档（不可运行，见 _DO_NOT_RUN.md）
-tests/                       504 个测试
+tests/                       516 个测试
 ```
 
 ---
@@ -157,6 +157,9 @@ age 是混杂因子。所以 `residualize` 在合成数据上分数接近随机�
 ### 交叉验证策略
 
 - `--strategy stratified`：分层 K 折，样本充足时的常规口径。
+- `--strategy site_stratified`：站点分层 K 折——每折从每个站点按比例抽取，站点
+  构成在各折间保持均衡（介于 stratified 与 LOSO 之间的第三种口径，协议移植自
+  2020 年上游代码，已改为固定种子可复现）。
 - `--strategy loso`：Leave-One-Site-Out，7 折分别留出 7 个扫描站点，用来测站点
   间泛化。LOSO 每折只有一批观测，所以报告附站点构成表和站点内指标，否则低分
   可能只是某一个不均衡站点造成的。

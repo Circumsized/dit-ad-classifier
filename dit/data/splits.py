@@ -65,6 +65,49 @@ def leave_one_site_out(site: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarra
         yield train, test, held_out
 
 
+def site_stratified_kfold_indices(
+    site: np.ndarray, n_splits: int = 5, seed: int = 42
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield deterministic folds that hold out 1/n of every site.
+
+    Ported from the 2020 upstream ``data_division.py`` protocol: every fold's
+    test slice draws a proportional chunk from each site, so site prevalence
+    is balanced across folds (unlike LOSO, which removes a site entirely).
+    Remainder subjects are dealt round-robin instead of the upstream's
+    last-chunk padding.
+    """
+
+    groups = np.asarray(site).reshape(-1)
+    if groups.size == 0:
+        raise ValueError("site cannot be empty")
+    if n_splits < 2:
+        raise ValueError("n_splits must be >= 2")
+    if np.any(groups == -1):
+        raise ValueError("site contains -1/missing values; cannot stratify by site")
+
+    sizes = [int(np.sum(groups == value)) for value in np.unique(groups)]
+    smallest = min(sizes)
+    if n_splits > smallest:
+        raise ValueError(
+            f"n_splits={n_splits} exceeds the smallest site count ({smallest}); "
+            "reduce n_splits so every fold holds out part of every site"
+        )
+
+    rng = np.random.default_rng(seed)
+    buckets: list[list[int]] = [[] for _ in range(n_splits)]
+    for value in np.unique(groups):
+        indices = np.flatnonzero(groups == value)
+        rng.shuffle(indices)
+        for position, index in enumerate(indices):
+            buckets[position % n_splits].append(int(index))
+    all_indices = np.arange(groups.shape[0])
+    for fold in range(n_splits):
+        test = np.asarray(sorted(buckets[fold]), dtype=int)
+        train_mask = np.ones(groups.shape[0], dtype=bool)
+        train_mask[test] = False
+        yield all_indices[train_mask], test
+
+
 def split_indices(
     y: np.ndarray,
     site: np.ndarray | None = None,
@@ -79,6 +122,12 @@ def split_indices(
         if site is None:
             raise ValueError("site metadata is required for LOSO")
         yield from leave_one_site_out(site)
+        return
+    if name in {"site_stratified", "site_stratified_kfold"}:
+        if site is None:
+            raise ValueError("site metadata is required for site-stratified folds")
+        for fold, (train, test) in enumerate(site_stratified_kfold_indices(site, n_splits, seed)):
+            yield train, test, fold
         return
     if name not in {"stratified", "stratified_kfold", "competition"}:
         raise ValueError(f"unknown split strategy: {strategy}")

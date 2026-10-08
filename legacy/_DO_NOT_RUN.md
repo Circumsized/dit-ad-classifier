@@ -3,7 +3,9 @@
 These five scripts are the **original course submission**, kept only as a
 historical record. They are not maintained, not tested, and none of them can
 produce a valid result. The maintained pipeline is the `dit/` package — see the
-README and `docs/OPTIMIZATION_PLAN.md`.
+README and `docs/OPTIMIZATION_PLAN.md`. The 2020 upstream codebase these
+scripts derive from is archived verbatim in `afq2020_reference/` (see its
+README).
 
 | Script | Task | Status |
 |---|---|---|

@@ -12,6 +12,7 @@ import pytest
 
 from dit.data.splits import (
     leave_one_site_out,
+    site_stratified_kfold_indices,
     split_indices,
     stratified_kfold_indices,
 )
@@ -118,6 +119,55 @@ class TestLeaveOneSiteOut:
         assert list(leave_one_site_out(np.array([0, 0, 0]))) == []
 
 
+class TestSiteStratifiedKfold:
+    def test_disjoint_and_exhaustive(self) -> None:
+        site = np.array([0] * 30 + [1] * 30 + [2] * 30)
+        folds = list(site_stratified_kfold_indices(site, 5, seed=1))
+        assert len(folds) == 5
+        seen: list[int] = []
+        for train, test in folds:
+            assert np.intersect1d(train, test).size == 0, "fold overlap"
+            seen.extend(test.tolist())
+        assert sorted(seen) == list(range(site.size)), "every subject must be tested once"
+
+    def test_every_fold_holds_out_every_site(self) -> None:
+        site = np.array([0] * 25 + [1] * 25 + [2] * 25)
+        for _, test in site_stratified_kfold_indices(site, 5, seed=1):
+            assert set(site[test].tolist()) == {0, 1, 2}
+
+    def test_site_proportions_are_balanced(self) -> None:
+        site = np.array([0] * 40 + [1] * 20)
+        for _, test in site_stratified_kfold_indices(site, 5, seed=2):
+            counts = np.bincount(site[test], minlength=2)
+            assert counts[0] in (8, 9) and counts[1] in (4, 5)
+
+    def test_is_deterministic_for_a_seed(self) -> None:
+        site = np.array([0] * 25 + [1] * 25 + [2] * 25)
+        first = [tuple(test.tolist()) for _, test in site_stratified_kfold_indices(site, 5, seed=7)]
+        second = [tuple(test.tolist()) for _, test in site_stratified_kfold_indices(site, 5, seed=7)]
+        third = [tuple(test.tolist()) for _, test in site_stratified_kfold_indices(site, 5, seed=8)]
+        assert first == second
+        assert first != third
+
+    @pytest.mark.parametrize("n_splits", [1, 0, -1])
+    def test_invalid_split_count_raises(self, n_splits: int) -> None:
+        with pytest.raises(ValueError, match="n_splits"):
+            list(site_stratified_kfold_indices(np.zeros(10, dtype=int), n_splits))
+
+    def test_split_count_cannot_exceed_smallest_site(self) -> None:
+        site = np.array([0] * 3 + [1] * 20)
+        with pytest.raises(ValueError, match="smallest site count"):
+            list(site_stratified_kfold_indices(site, 5, seed=1))
+
+    def test_missing_sites_raise(self) -> None:
+        with pytest.raises(ValueError, match="-1/missing"):
+            list(site_stratified_kfold_indices(np.array([0, 0, -1, 1])))
+
+    def test_empty_sites_raise(self) -> None:
+        with pytest.raises(ValueError, match="site cannot be empty"):
+            list(site_stratified_kfold_indices(np.array([])))
+
+
 class TestUnifiedSplitInterface:
     def test_stratified_strategy_delegates(self) -> None:
         y = np.array([0] * 20 + [1] * 20)
@@ -144,3 +194,14 @@ class TestUnifiedSplitInterface:
         y = np.array([0, 1] * 6)
         folds = list(split_indices(y, site, strategy="loso"))
         assert [int(f[2]) for f in folds] == [0, 1]
+
+    def test_site_stratified_strategy_delegates(self) -> None:
+        site = np.array([0] * 20 + [1] * 20)
+        y = np.array([0, 1] * 20)
+        folds = list(split_indices(y, site, strategy="site_stratified", n_splits=4, seed=1))
+        assert len(folds) == 4
+        assert [int(f[2]) for f in folds] == [0, 1, 2, 3]
+
+    def test_site_stratified_requires_site_metadata(self) -> None:
+        with pytest.raises(ValueError, match="site metadata is required"):
+            list(split_indices(np.array([0, 1, 0, 1]), None, strategy="site_stratified"))
