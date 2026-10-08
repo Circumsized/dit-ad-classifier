@@ -74,7 +74,9 @@ def site_stratified_kfold_indices(
     test slice draws a proportional chunk from each site, so site prevalence
     is balanced across folds (unlike LOSO, which removes a site entirely).
     Remainder subjects are dealt round-robin instead of the upstream's
-    last-chunk padding.
+    last-chunk padding. Expects integer-coded site labels (the MAT loader
+    emits int64 with -1 for missing); other dtypes are outside the data
+    contract.
     """
 
     groups = np.asarray(site).reshape(-1)
@@ -85,7 +87,13 @@ def site_stratified_kfold_indices(
     if np.any(groups == -1):
         raise ValueError("site contains -1/missing values; cannot stratify by site")
 
-    sizes = [int(np.sum(groups == value)) for value in np.unique(groups)]
+    values = np.unique(groups)
+    if values.size == 1:
+        raise ValueError(
+            "site contains a single site value; site-stratified folds need at least two sites"
+        )
+
+    sizes = [int(np.sum(groups == value)) for value in values]
     smallest = min(sizes)
     if n_splits > smallest:
         raise ValueError(
@@ -95,7 +103,7 @@ def site_stratified_kfold_indices(
 
     rng = np.random.default_rng(seed)
     buckets: list[list[int]] = [[] for _ in range(n_splits)]
-    for value in np.unique(groups):
+    for value in values:
         indices = np.flatnonzero(groups == value)
         rng.shuffle(indices)
         for position, index in enumerate(indices):

@@ -733,7 +733,7 @@ def build_parser() -> argparse.ArgumentParser:
     ablation = sub.add_parser("ablation", help="sweep covariate policy, view and model")
     _add_dataset_args(ablation)
     ablation.add_argument("--task", choices=("binary", "multiclass"), default="binary")
-    ablation.add_argument("--strategy", choices=("stratified", "loso"), default="stratified")
+    ablation.add_argument("--strategy", choices=("stratified", "loso", "site_stratified"), default="stratified")
     ablation.add_argument("--model", default="linear_svm")
     ablation.add_argument("--view", default="summary")
     ablation.add_argument("--smooth-window", type=int, default=5)

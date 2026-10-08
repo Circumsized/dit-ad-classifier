@@ -148,7 +148,7 @@ class TestEnsembleRun:
 
     def test_loso_and_stratified_share_the_ensemble_path(self) -> None:
         bundle = make_synthetic_bundle(n_samples=70, n_tracts=4, n_points=16, n_metrics=2, seed=16)
-        for strategy in ("stratified", "loso"):
+        for strategy in ("stratified", "loso", "site_stratified"):
             result = run_ensemble(bundle, replace_config(BASELINE, split_strategy=strategy))
             assert np.isfinite(result.probabilities).all()
             assert len(result.folds) >= 2
