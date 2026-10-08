@@ -204,6 +204,43 @@ class TestBudgetAccounting:
             assert budget["n_fits"] == 9 * 2 + 1
             assert budget["candidate_fit_seconds"] >= 0.0
 
+    def test_classical_folds_disclose_the_inner_cv_scheme(self) -> None:
+        """Classical folds must state which inner CV ran, like the deep path."""
+
+        bundle = _bundle(seed=15)
+        stratified = run_experiment(
+            bundle,
+            ExperimentConfig(model="linear_svm", n_splits=2, inner_splits=2, seed=1),
+        )
+        for fold in stratified.folds:
+            assert fold["inner_cv"] == "class_stratified"
+
+        loso = run_experiment(
+            bundle,
+            ExperimentConfig(
+                model="linear_svm",
+                n_splits=2,
+                inner_splits=2,
+                seed=1,
+                split_strategy="loso",
+            ),
+        )
+        for fold in loso.folds:
+            assert fold["inner_cv"] == "site_grouped"
+
+        site_stratified = run_experiment(
+            bundle,
+            ExperimentConfig(
+                model="linear_svm",
+                n_splits=2,
+                inner_splits=2,
+                seed=1,
+                split_strategy="site_stratified",
+            ),
+        )
+        for fold in site_stratified.folds:
+            assert fold["inner_cv"] == "class_stratified"
+
     def test_deep_folds_report_the_requested_epoch_budget(self) -> None:
         pytest.importorskip("torch", reason="deep budget accounting requires torch")
         result = run_experiment(

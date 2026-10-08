@@ -148,6 +148,24 @@ def test_ensemble_rejects_a_repeated_model() -> None:
         ExperimentConfig(ensemble_models=("logistic", "logistic"))
 
 
+def test_split_guard_surfaces_as_a_clean_cli_error(tmp_path) -> None:
+    """User-input contract violations print one actionable line, not a traceback."""
+
+    from dit.cli.main import main
+
+    with pytest.raises(SystemExit) as raised:
+        main(
+            [
+                "evaluate", "--synthetic", "--n-samples", "100", "--n-sites", "40",
+                "--n-classes", "2", "--strategy", "site_stratified",
+                "--out", str(tmp_path), "--quiet",
+            ]
+        )
+    message = str(raised.value)
+    assert message.startswith("error:")
+    assert "smallest site count" in message
+
+
 def test_interpret_exports_the_panel_renderer() -> None:
     from dit.interpret import render_metric_panel
 

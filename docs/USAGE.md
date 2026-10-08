@@ -128,7 +128,9 @@ n_batches 倍于 epoch 均值），对齐项每个 epoch 只加一次，所以�
 深度模型的学习率候选按以下规则打分：LOSO 外层折的训练行内若能整站留出（留出
 站与训练站都覆盖每个类别），就按种子随机顺序取**第一个**合格站点做验证，
 `inner_cv` 记为 `site_grouped`；否则（或 stratified 折）回退类别分层留出，
-`inner_cv` 记为 `class_stratified`。该字段逐折进入 JSON 与 Markdown 报告。
+`inner_cv` 记为 `class_stratified`。该字段逐折进入 JSON 与 Markdown 报告；
+经典路径同样逐折披露 `inner_cv`（LOSO 折为 `site_grouped`，其余策略为
+`class_stratified`）。
 与经典路径的 GroupKFold（多个留出站点平均）相比，单站一次打分的候选分方差
 更大——门控规则一致，估计精度不同，跨路径比较选择分时需记住这一点。量级
 参考（合成模拟，每站每类 3 人、均衡三类、真 BA 差距恒定、错误均匀分摊）：
