@@ -341,7 +341,7 @@ NaN 安全统计量、URL 策略的每一类地址，以及 Transformer 与域�
 - [docs/USAGE.md](docs/USAGE.md) — 域适应 Transformer、概率校准、跨模型集成、消融/解释与部署闭环的完整语义
 - [docs/FROZEN_EXPERIMENT_SPEC.md](docs/FROZEN_EXPERIMENT_SPEC.md) — W0 冻结实验规范（双轨目标、class_order、数据边界、候选上限、选择/确认分离）
 - [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md) — 历史审计与重写路线图（P0–P6 已全部落地，保留原始缺陷证据）
-- [docs/LICENSE_TODO.md](docs/LICENSE_TODO.md) — 许可状态与版权署名待确认项
+- [docs/LICENSE_TODO.md](docs/LICENSE_TODO.md) — 许可状态与版权署名记录（MIT，署名 Circumsized）
 - [legacy/_DO_NOT_RUN.md](legacy/_DO_NOT_RUN.md) — 原始脚本的缺陷存档（F1–F8）
 
 ---

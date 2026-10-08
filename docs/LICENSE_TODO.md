@@ -4,12 +4,11 @@ The repository owner chose **MIT** on 2026-10-07. A `LICENSE` file with the
 full MIT text now sits at the repository root and `pyproject.toml` declares
 `license = { file = "LICENSE" }`, so metadata and file agree.
 
-## One placeholder still needs the owner
+## Copyright holder (resolved)
 
-The `Copyright (c) 2026 <COPYRIGHT-HOLDER-TO-BE-CONFIRMED>` line in `LICENSE`
-is a deliberate placeholder: the copyright holder is an ownership decision
-that an automated change must not invent. Replace it with the real name or
-organisation before publishing.
+The owner confirmed **Circumsized** as the copyright holder on 2026-10-08.
+The `Copyright (c) 2026 Circumsized` line in `LICENSE` is final; the
+placeholder from the initial MIT draft is gone.
 
 ## Provenance note
 
