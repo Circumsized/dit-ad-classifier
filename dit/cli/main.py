@@ -67,7 +67,7 @@ def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_experiment_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", choices=("binary", "multiclass"), default="binary")
-    parser.add_argument("--strategy", choices=("stratified", "loso"), default="stratified")
+    parser.add_argument("--strategy", choices=("stratified", "loso", "site_stratified"), default="stratified")
     parser.add_argument("--model", default="linear_svm")
     parser.add_argument("--view", default="summary", help="summary, profile, or a metric name such as MD")
     parser.add_argument("--smooth-window", type=int, default=5)
