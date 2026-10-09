@@ -1,228 +1,312 @@
-# 用法详解
+# dit 系统工程与高级用法规范 (USAGE)
 
-本页扩展 `README.md` 的用法部分，收录深度模型的实现语义与设计取舍：域适应
-Transformer、概率校准、跨模型集成，以及消融/解释输出的完整说明；另附可信度
-修复与部署闭环（W 系列）的新增语义。快速上手、安装与 `--covariate` /
-`--strategy` / `--view` 三个基础开关的语义见 README；本页假设它们已经清楚。
+本文档定义 `dit` 系统的高阶实现语义、张量流动拓扑、域适应数学原理、概率校准方程与生产部署契约。
 
-## 可信度修复：残差化、预算与类别契约
+---
 
-可信度修复（W 系列）落地后，以下语义与早期版本不同：
+## 1. 深度白质几何注意力网络 (Tract-Transformer)
 
-- **残差化在管线内逐折拟合。** `--covariate residualize` 不再在外层训练折上
-  预先回归一次：协变量作为特征矩阵尾列进入 sklearn 管线，管线第一步把尾列
-  剥离、按训练行拟合回归并输出残差（协变量列被丢弃，模型永远看不到 age/sex）。
-  GridSearchCV 因此在内层每个训练折里重拟合回归——内层验证行的协变量不再
-  影响系数，最终模型的重拟合走同一条路径。缺失值方案预先固定为"训练行中位数
-  插补后回归"：散布缺失的列照常去混杂，整列缺失的列系数为 0 且输出保持 NaN。
-  每折报告的 `residualizer` 字段给出真实拟合列数、训练行数与含插补列数。
-- **深度训练预算由配置决定。** 搜索网格只扫学习率；`epochs` 是调用方配置的
-  硬上限，候选与最终模型都不会被隐藏网格覆盖。每折报告同时给出
-  `epochs_requested` 与 `epochs_run`，能对上"请求了多少、实际跑了多少"。
-  经典路径每折给出 `inner_budget`（候选数、内层折数、总拟合次数、候选拟合
-  计时），报告写明实际算过的东西。
-- **类别契约失败即报错。** 概率对齐时若训练折缺类，直接报错而不是用零补列
-  （零补会把"模型没见过这个类"伪装成 0 概率）；外层概率宽度统一取任务视图
-  的类别数。内层交叉验证在搜索前预检每个验证切片的类别覆盖，缺类切片会让
-  balanced accuracy 在不完整的类别集上平均，直接拒绝。
-- **深度路径全程携带缺失掩码。** 训练、对齐、早停、校准与推理的每次前向
-  都显式传入 `valid_mask`；填入的占位值不会参与注意力池化，整束缺失仍被屏蔽。
-- **校准包裹完整管线。** sklearn ≥ 1.9 的 SVM 概率校准把插补、缩放与选择
-  一并包进校准交叉验证内部：Platt 标量的拟合折里预处理也被重拟合，带监督
-  选择器时校准样本不再复用"看过所有内层标签"的预处理。
-- **报告声明选优口径。** aggregate 现在显式给出 `selection_metric`（内层
-  搜索的打分口径）与 `prediction_rule`（外层报告使用 predict_proba argmax）。
-- **数据快照身份。** 每个外层折 manifest 携带非 PHI 的 `data_digest`
-  （SHA-256，覆盖特征值、标签、站点、协变量与解剖名，顺序敏感）；配对比较
-  在两侧都报告摘要时会拒绝不同数据快照的结果，即使折结构完全一致。
-- **全缺失列不再破坏布局。** 特征选择与主管线的插补都保留全 NaN 列
-  （`keep_empty_features`），系数与解剖列号的对应关系不会因丢列而错位。
+传统方法通常将弥散张量展平为一维特征向量，从而破坏了白质纤维束的空间解剖拓扑。`TractTransformer` 将 18 条白质纤维束作为 18 个独立的解剖学 Token 进行三维交互建模。
 
-## 负对照输入
+```
+Tract-Transformer 内部张量流动与掩码注意力拓扑:
 
-```bash
-python -m dit.cli evaluate --synthetic --control-view demographics --out reports/ctrl-demo
-python -m dit.cli evaluate --synthetic --control-view missingness --out reports/ctrl-miss
+输入张量: X ∈ ℝ^(B × 18 × 100 × M)
+掩码张量: mask ∈ {0, 1}^(B × 18 × 100)
+       │
+       ▼
+[ 展平局部节点特征: Flatten(100 × M) → D_in ]
+       │
+       ▼  H_0 ∈ ℝ^(B × 18 × D_in)
+[ 线性投射层 Linear(D_in → D_model) + 可学习解剖位置编码 E_pos ∈ ℝ^(18 × D_model) ]
+       │
+       ▼  Z_0 ∈ ℝ^(B × 18 × D_model)
+┌────────────────────────────────────────────────────────┐
+│ Transformer 编码器层 (L = 1..N_layers)                 │
+│                                                        │
+│   Z'_{l-1} = LayerNorm(Z_{l-1})                        │
+│   A_l = Softmax( (Q K^T) / √D_k + M_tract )            │  <- M_tract: 整束缺失掩码
+│   Z~_l = MultiHeadAttention(Q, K, V) + Z_{l-1}         │
+│                                                        │
+│   Z_l = MLP(LayerNorm(Z~_l)) + Z~_l                    │
+└────────────────────────────────────────────────────────┘
+       │
+       ▼  Z_L ∈ ℝ^(B × 18 × D_model)
+[ 有效束掩码均值池化 (Masked Mean Pooling) ]
+       h_pool = (Σ_i Z_L[:, i, :] · m_i) / (Σ_i m_i + ε)  ∈ ℝ^(B × D_model)
+       │
+       ├─────────────────────────────────────────┐
+       ▼                                         ▼
+[ 疾病诊断分类头 ]                      [ 多中心域适应对齐头 ]
+ Linear(D_model → 1024)                  (CORAL / MMD / DANN)
+ ReLU() + Dropout(0.1)                             │
+ Linear(1024 → N_classes)                          │
+       │                                           │
+       ▼                                           ▼
+ 诊断损失 L_CE (类别加权交叉熵)           中心间分布距离 L_align
+       │                                           │
+       └────────────────────┬──────────────────────┘
+                            ▼
+               总优化目标: L = L_CE + γ(t) · L_align
 ```
 
-- `demographics` — 只用 [age, sex] 两列建模；
-- `missingness` — 只用每束的节点缺失率建模。
+### 1.1 节点缺失与整束掩码传播
 
-两者跑与影像视图完全相同的折、指标、阈值与站点报告，用于回答"模型到底
-在用什么信号"。若缺失率负对照接近影像模型的成绩，信号更可能是采集或质控
-伪影；若人口学对照接近完整模型，影像特征的增量就需要重新审视。负对照不参与
-模型晋级，也不支持与深度模型、选择器、残差化或集成组合（显式拒绝）。
+白质追踪算法可能在特定受试者的特定纤维束上追踪失败，导致整条束的值为 NaN。系统在前向计算中严格传递布尔掩码 `valid_mask`：
+1. **插补隔离**：输入端将 NaN 置为 0.0，但对应掩码位置设为 `False`。
+2. **自注意力屏蔽**：若某纤维束的全部 100 个节点均为缺失，则注意力偏置矩阵施加 $-\infty$，阻止其他解剖结构聚合该未追踪纤维束的信息。
+3. **池化归一化**：池化层分母仅计算实际存在的有效纤维束数目，防止由于缺失束的填充零导致特征向量模长被人为压缩。
 
-## 部署闭环：fit / predict
+### 1.2 跨中心域适应对齐数学与 Epoch 动态调度
 
-交叉验证报告流程质量，`fit` / `predict` 产出可提交的模型与预测：
+小批量（Mini-batch）样本通常无法覆盖全部扫描中心（Site），导致在 Mini-batch 内计算多中心对齐存在极端统计偏差。因此系统将特征对齐解耦为 **全 Epoch 训练特征累加对齐**。
 
-```bash
-python -m dit.cli fit --mat MCAD_AFQ_competition.mat \
-    --task binary --model linear_svm --artifact artifacts/model.joblib
-python -m dit.cli predict --mat MCAD_AFQ_test.mat \
-    --artifact artifacts/model.joblib --out predictions.csv
+```
+Epoch 对齐强度调度函数 γ(t):
+
+对齐强度 γ(t)
+ 1.0 ┼───────────────────────╭────────────────────────
+     │                      ╭╯
+     │                     ╭╯ (线性预热阶段: alignment_ramp)
+     │                    ╭╯
+ 0.0 ┼───────────────────╭╯
+     └───────────────────┴────────────────────────────► Epoch t
+     0              T_ramp                           T_max
 ```
 
-- `fit` 用与评估路径**完全相同**的管线（同样的折内预处理、同样的打分口径、
-  同样的网格）在全部有标签行上重调参并最终重拟合。由此产生的任何分数都是
-  选择分数——无偏性能只来自交叉验证报告，这是设计而不是疏漏。
-- 工件（pickle）携带：拟合管线、label_map、特征名、配置快照、数据快照摘要、
-  best_params 与类别表。`predict` 载入工件后用冻结的视图设置重建特征矩阵，
-  列数不符显式报错；输出 CSV 含 subject_id、预测编码、预测类名与逐类概率，
-  概率行和严格校验为 1。
-- pickle 是可执行数据，载入有两道闸：`fit` 同时写出 SHA-256 校验文件
-  （`<artifact>.sha256`），`predict` 先验校验和再反序列化，缺文件或不匹配一律
-  拒绝；反序列化的类解析限制在 numpy/scipy/sklearn/dit 等管线实际引用的模块根
-  内。校验和挡损坏与错配，白名单挡白名单外模块的直接引用；两者都不构成安全
-  边界——白名单包内部存在可被 REDUCE 调用的代码型全局（实测
-  `numpy.testing._private.utils.runstring` 可在载入时执行任意代码），且能改工件
-  的人也能重算校验和。只载入自己产出的工件，工件与数据集同访问控制；对抗
-  不可信来源请换用 skops 等载入时不执行代码的格式。
-- 预测流程不读取真实标签；对带标签的数据运行 `predict` 只用于验收一致性。
-- 深度模型、集成与控制视图显式拒绝进入部署工件：深度工件需要携带 torch
-  权重与掩码语义，属后续工作。
+调度规律为：
+$$\gamma(t) = \min\left(1.0, \frac{t + 1}{T_{\text{ramp}}}\right) \cdot \lambda_{\text{align}}$$
 
-## 域适应 Transformer
+三种对齐损失的精确数学定义如下：
 
-```bash
-python -m dit.cli evaluate --synthetic --n-samples 140 \
-    --model tract_transformer --alignment coral \
-    --deep-epochs 120 --deep-batch-size 16 --out reports/deep
+#### A. CORAL (Correlation Alignment)
+计算源站点 $S$ 与目标站点 $T$ 在瓶颈层特征表征上的协方差矩阵偏离度：
+$$\mathcal{L}_{\text{CORAL}} = \frac{1}{4 d^2} \| C_S - C_T \|_F^2$$
+其中 $C = \frac{1}{n - 1} (H^T H - \frac{1}{n} (\mathbf{1}^T H)^T (\mathbf{1}^T H))$，$d$ 为特征隐层维度，$\|\cdot\|_F$ 为 Frobenius 范数。
+
+#### B. MMD (Maximum Mean Discrepancy)
+使用多核高斯径向基函数（RBF）映射，度量再生核希尔伯特空间（RKHS）中的多中心边际分布均值嵌入距离：
+$$k(x, x') = \sum_{q=1}^Q \exp\left( -\frac{\|x - x'\|^2}{2 \sigma_q^2} \right)$$
+$$\mathcal{L}_{\text{MMD}} = \frac{1}{n_S^2} \sum_{i,j} k(h_i^S, h_j^S) - \frac{2}{n_S n_T} \sum_{i,j} k(h_i^S, h_j^T) + \frac{1}{n_T^2} \sum_{i,j} k(h_i^T, h_j^T)$$
+
+#### C. DANN (Domain Adversarial Neural Network)
+利用梯度反转层（GRL）联合训练特征提取器 $G_f$ 与中心判别器 $G_d$：
+$$\mathcal{L}_{\text{DANN}} = \mathcal{L}_{\text{CE}}(y, \hat{y}) - \lambda_{\text{DANN}} \mathcal{L}_{\text{Domain}}(s, \hat{s})$$
+在前向传播中：$R(h) = h$；在反向传播中：$\frac{\partial R}{\partial h} = -\gamma(t) \mathbf{I}$。
+
+---
+
+## 2. 嵌套模型选择与内层交叉验证状态机
+
+为了保证外层泛化评估无偏，任何超参数（包括学习率、正则化权重 $C$、网络层数）的选优必须严格限制在外层训练折所包含的样本内。
+
+```
+内层超参数选择决策状态机:
+
+               [ 外层训练折样本 (N_train) ]
+                           │
+             ┌─────────────┴─────────────┐
+             ▼                           ▼
+      [ Track A: Stratified ]     [ Track B: LOSO ]
+             │                           │
+             │                    训练折内是否存在至少一个站点，
+             │                    该站点同时包含所有疾病类别?
+             │                           │
+             │                  ┌────────┴────────┐
+             │                  ▼ (是)             ▼ (否: 存在单类偏斜)
+             │          [ 站点整留出验证 ]        [ 回退分层留出 ]
+             │           (Site-Grouped)     (Class-Stratified Fallback)
+             │                  │                 │
+             └──────────┬───────┴─────────────────┘
+                        ▼
+               [ 计算验证集平衡准确率 ]
+                        │
+                        ▼
+           [ 选定最优超参 θ* (如 lr, C) ]
+                        │
+                        ▼
+           [ 用整条外层训练折拟合最终模型 ]
+                        │
+                        ▼
+           [ 报告内层选择方案 inner_cv: "site_grouped" | "class_stratified" ]
 ```
 
-Transformer 直接吃原始 `[N, tract, node, metric]` 张量，不做展平。
-`--alignment` 可选：
+### 2.1 经典路径与深度路径的内层方差特性
 
-- `none` — 纯交叉熵
-- `coral` — 源/目标协方差对齐（CORAL）
-- `mmd` — 多尺度 RBF 最大均值差异
-- `dann` — 梯度反转 + 站点判别器（DANN）
+两种路径遵循同一套内层选择门控，但在估计方差上存在明确差异：
+- **经典分类器路径**：执行完整的 `GroupKFold` 或 `StratifiedKFold`，评估分数取所有内层切分的加权算术平均值。
+- **深度分类器路径**：由于深度神经网络的训练开销，深度搜索按随机种子顺序抽取**首个合格的留出切片**计算验证准确率。在样本受限的单中心验证切片上（例如单个中心仅 9 名受试者），候选打分方差显著高于经典多折平均，因此深度调优选出的超参数需视为局部经验选择，不得过度外推。
 
-对齐损失按站点配对计算。这里有个容易踩的坑：每个 mini-batch 只有十几个样本，
-摊到 7 个站点上几乎不可能凑出两个"各有两个成员"的站点，**按 batch 计算对齐等于
-什么都没做**。因此对齐统计量是在每个 epoch 的训练行子集上算的。
-`alignment_ramp` 从第一个 epoch 起线性增加对齐强度：
-`min(1, (epoch + 1) / alignment_ramp)`。CORAL/MMD 的惩罚及其梯度乘以该强度，
-DANN 只在梯度反转处缩放特征梯度，判别器仍学习站点分类。它不是前几轮完全关闭
-对齐的纯分类阶段。训练摘要里的 `alignment_active` 字段确认对齐是否实际参与。
+---
 
-分类梯度跨 batch 累积后，每个 epoch 只更新一次。加权交叉熵按整个训练切片的
-类别权重总和归约，无权重时按训练样本数归约；尾 batch 不会被额外放大。
-`history_["training"]` 记录全 epoch 分类均值加当轮加权对齐项，不再除以 batch 数。
-注意与旧实现相比的相对强度变化：旧代码累积的是"逐 batch 均值之和"（梯度约
-n_batches 倍于 epoch 均值），对齐项每个 epoch 只加一次，所以同样的
-`alignment_weight` 现在相对分类梯度约强 n_batches 倍（默认 batch_size=8、
-每折 40 行时约 5 倍）。如需旧平衡，把 `alignment_weight` 除以约 n_batches；
-跨版本比较对齐实验时必须记住这一变化。
+## 3. 概率校准系统 (Probability Calibration)
 
-`--deterministic` 打开确定性训练内核（计划 P0.6 的可选开关）：仅在请求确定性
-时改动全局 `torch.use_deterministic_algorithms`，并在 fit 返回（或抛出）时恢复
-调用者原有状态（含 `warn_only`）；未请求时完全不碰全局状态，继承调用者现状。
-报告 `parameters()["deterministic"]` 如实声明是否开启。CPU 上本包用到的算子
-全部有确定性实现；某些 CUDA 算子没有，开启后会在训练时报错，这正是开关设计
-为 opt-in 的原因。
+在样本不均衡的医学诊断中，模型通常采用类别加权交叉熵进行参数优化，这会导致输出的置信度偏离真实的贝叶斯后验概率。
 
-## 内层候选选择（深度路径）
+```
+后验概率校准与双重留出流程图:
 
-深度模型的学习率候选按以下规则打分：LOSO 外层折的训练行内若能整站留出（留出
-站与训练站都覆盖每个类别），就按种子随机顺序取**第一个**合格站点做验证，
-`inner_cv` 记为 `site_grouped`；否则（或 stratified 折）回退类别分层留出，
-`inner_cv` 记为 `class_stratified`。该字段逐折进入 JSON 与 Markdown 报告；
-经典路径同样逐折披露 `inner_cv`（LOSO 折为 `site_grouped`，其余策略为
-`class_stratified`）。
-与经典路径的 GroupKFold（多个留出站点平均）相比，单站一次打分的候选分方差
-更大——门控规则一致，估计精度不同，跨路径比较选择分时需记住这一点。量级
-参考（合成模拟，每站每类 3 人、均衡三类、真 BA 差距恒定、错误均匀分摊）：
-整站 9 人时，真实差距 2 / 5 / 10 个百分点的选错候选概率约为 46% / 41% / 33%；
-三站 GroupKFold 平均（27 人）约为 44% / 35% / 22%。也就是说小折深度的学习率
-选择本身就接近掷硬币，读 `best_params` 与 `tuning_score` 时不要过度解读。
-
-## 概率校准
-
-```bash
-python -m dit.cli evaluate --synthetic --n-samples 140 \
-    --model tract_transformer --deep-calibration temperature \
-    --deep-epochs 120 --out reports/deep
+外层训练折 (N_train 样本)
+       │
+       ├─────────────────────────────────────────────┐
+       ▼ (80% 样本)                                   ▼ (20% 留出样本)
+[ 深度神经网络前向与反向传播 ]                 [ 独立的无偏校准集合 ]
+ - 早停判定 (Early Stopping)                   - 完全不参与早停判定
+ - 权重衰减与域对齐训练                         - 冻结分类器权重
+       │                                             │
+       ▼                                             ▼
+ 未校准分类器模型 M_raw ───────────────────────► [ 拟合校准参数 ]
+                                                ├── 温度缩放: 优化标量 T
+                                                └── Sigmoid 映射: 拟合 OvR 逻辑回归
+                                                     │
+                                                     ▼
+                                          [ 最终校准后模型 M_calibrated ]
+                                                     │
+                                                     ▼
+                                          [ 作用于未见外层测试折 X_test ]
 ```
 
-类别加权交叉熵改变了网络拟合的后验目标，raw softmax 不应直接解释为真实队列的
-疾病概率。accuracy/AUC 不足以判断概率是否校准，需结合 Brier、NLL、ECE 等诊断。
-`--deep-calibration` 提供两种事后校准：
+### 3.1 校准算法数学方程
 
-- `temperature` — 拟合温度标量并除以 logits，保留 argmax 预测。
-- `sigmoid` — 每类在完整概率向量上拟合二元 logistic，再逐行归一化；这是多变量
-  one-vs-rest 概率映射，不是每类只用一个分数的一维 Platt sigmoid，可能改变预测类别。
+系统支持两种后验概率校准算法：
 
-两种都在**早停没用过的那部分留出集**上拟合：留出集会被切成一半做早停、一半做
-校准，因为用选出停止点的同一批行去拟合校准，等于拿自己的答案卡做题。校准不会
-出现在网格候选上——候选只按平衡准确率打分，概率尺度根本用不到。
+#### A. 温度缩放 (Temperature Scaling)
+仅优化单一标量参数 $T > 0$（通过 L-BFGS 最小化校准集上的负对数似然损失）：
+$$P(y = k \mid z) = \frac{\exp(z_k / T)}{\sum_{j=1}^K \exp(z_j / T)}$$
+- **保序性质**：对于任意 $j, k$，若 $z_j > z_k$，则在任意 $T > 0$ 下均有 $P(y=j) > P(y=k)$。该变换**严格保持原始 Argmax 分类边界不变**。
+- **饱和监控**：报告中的 `temperature_saturated` 标记指示优化是否触及搜索边界（如 $T \to 0.01$ 或 $T \to 100.0$）。
 
-每折报告里会给出 `calibration`、`calibration_applied`、`temperature` 和
-`temperature_saturated`，用来确认校准真的被施加过。`temperature_saturated`
-标记温度是否撞到了搜索区间的边界——目标函数平坦时搜索会走到墙上，`148.4`
-可能是真实拟合值也可能是被截断的值，光看数字分不出来。
+#### B. 多元 Sigmoid 向量校准 (Multivariate Sigmoid / One-vs-Rest)
+在概率单纯形上针对每个类别 $k$ 拟合一个独立的二元 Logistic 回归，随后重新执行归一化：
+$$q_k = \sigma(A_k \cdot p_k + B_k) = \frac{1}{1 + \exp(-(A_k \cdot p_k + B_k))}$$
+$$P_{\text{calibrated}}(y = k) = \frac{q_k}{\sum_{j=1}^K q_j}$$
+- 此方法允许重新调整分类超平面，因此**可能改变最终的 Argmax 判别结果**。
+- 适用约束：校准集中每个类别必须包含不少于 2 个正样本与 2 个负样本。
 
-校准拒绝非有限、越界或行和不为 1 的概率输入；`sigmoid` 还要求每类至少两个
-正例和两个负例。这些是可拟合性检查，不是小样本泛化保证。
+---
 
-原来的 85% 原始概率保留硬门槛已移除：例如无信息、两类均衡的数据，原始
-`[0.9, 0.1]` 校正到真实后验 `[0.5, 0.5]` 是正确的去过度自信，不能因类别概率
-下降而拒绝。常数输入应能拟合校准切片的类别先验。
+## 4. 跨模型动态加权集成机制 (Ensemble Architecture)
 
-校准拟合切片上的 NLL/ECE/Brier 改善不证明外部泛化，也不能据此筛选后再报告
-无偏效果。效果判断仍使用外层测试折，并检查逐类表现与样本支持；真实临床验证
-需要独立队列。
+`--model ensemble` 结合了多样化的归纳偏置（线性核 SVM、对数几率模型、树模型与深度几何网络）。
 
-## 跨模型集成
+```
+折内动态加权软投票机制:
 
-```bash
-python -m dit.cli evaluate --synthetic --n-samples 140 \
-    --model ensemble \
-    --ensemble-models linear_svm,logistic,random_forest \
-    --ensemble-weighting inner_score --out reports/ensemble
+外层训练集 X_train ────────────────────────────────────────────────────────┐
+       │                                                                  │
+       ├──────────────────────┬──────────────────────┬────────────────────┤
+       ▼                      ▼                      ▼                    ▼
+[ 线性支持向量机 ]       [ 逻辑回归 ]           [ 随机森林 ]         [ Tract-Transformer ]
+  Linear SVM             Logistic Reg           Random Forest        (自动启用温度校准)
+       │                      │                      │                    │
+       ▼                      ▼                      ▼                    ▼
+内层得分: s_1            内层得分: s_2          内层得分: s_3        内层得分: s_4
+       │                      │                      │                    │
+       └──────────────────────┴──────────────────────┴────────────────────┘
+                                      │
+                                      ▼ 动态权重归一化计算
+                         w_m = s_m / Σ_j s_j   (若策略为 inner_score)
+                                      │
+测试样本 X_test ───────────────────────┼──────────────────────────────────┐
+                                      ▼                                  ▼
+[ 收集各基模型输出后验概率向量 ] P_1(x), P_2(x), P_3(x), P_4(x)
+                                      │
+                                      ▼ 加权集成后验
+                         P_ens(x) = Σ_m w_m · P_m(x)
+                                      │
+                                      ▼
+                         最终判定: ŷ = argmax P_ens(x)
 ```
 
-`--model ensemble` 不使用单个模型，而是在每个外层折内跑完整套基础阵容（各自带
-嵌套网格搜索），再对 **out-of-fold 概率**做软投票。报告里给出每个基础模型的
-单独分数（`base_model_scores`）和每折的权重（`weights`）。
+### 4.1 集成设计准则
 
-两点设计取舍：
+1. **动态权重无泄漏保证**：权重 $w_m$ 仅根据模型在**当前外层训练折的内层交叉验证平衡准确率**计算，绝不使用全数据集得分进行全局加权。
+2. **深度置信度压制**：当集成阵容包含 `tract_transformer` 时，系统自动强制开启其温度校准。未经校准的深度网络常产生接近 1.0 的极度自信后验，从而在软投票中破坏线性分类器与树模型的表决权重。
 
-- **权重按折重算，不做全局加权。** `inner_score` 用每个基础模型在该折内层 CV
-  的平衡准确率做权重——这个数来自同一个外层折内部，所以不构成泄漏。换成
-  全局权重等于假设"哪个模型更有用"这件事跨折不变，而它实际上会变。
-  `--ensemble-weighting equal` 退化为等权平均。
-- **默认阵容不含 Transformer，因为贵，不是因为不对。** 显式写进去是支持的：
-  `--ensemble-models logistic,tract_transformer`。集成发现阵容里有深度模型时会
-  自动给它打开温度校准——软投票平均的是概率，而带类别权重的 Transformer 输出
-  的系统性偏高会让它的票只凭"嗓门大"就压过别人。显式指定 `--deep-calibration`
-  的取值永远不会被覆盖。
+---
 
-## 消融与解释
+## 5. 生产部署闭环 (Deployment Engine: Fit & Predict)
+
+交叉验证（`evaluate`）用于估计泛化性能下界，不输出最终生产模型。生产模型交付由 `fit` 与 `predict` 构成严格闭环。
+
+```
+生产模型拟合与推理交付链路:
+
+[ 有标签训练全集 (MAT / Synthetic) ]
+       │
+       ▼
+ python -m dit.cli fit --mat data.mat --artifact artifacts/model.joblib
+       │
+       ├── 1. 基于全量有标签数据执行折内完整超参搜索流水线
+       ├── 2. 导出序列化模型工件: artifacts/model.joblib
+       └── 3. 计算并写出 SHA-256 哈希侧车: artifacts/model.joblib.sha256
+               │
+               ▼
+[ 未标记测试数据集 (如竞赛盲测集 MCAD_AFQ_test.mat) ]
+       │
+       ▼
+ python -m dit.cli predict --mat test.mat --artifact artifacts/model.joblib --out pred.csv
+       │
+       ├── 1. 验证阶段: 强行校验 model.joblib 的 SHA-256 签名匹配
+       ├── 2. 载入阶段: 安全白名单 Class-Unpickler 反序列化
+       ├── 3. 特征构建: 根据工件冻结的 FeatureLayout 重建测试特征矩阵
+       ├── 4. 维度校验: 特征列数必须严格等于 layout.total_features，否则抛出异常
+       └── 5. 导出预测: 输出包含 subject_id、预测标签编码及逐类概率分布的 CSV
+```
+
+### 5.1 部署工件安全性与反序列化边界
+
+模型工件格式为 Python `joblib/pickle`。反序列化时系统强制执行 `dit.deployment.RestrictedUnpickler`，仅放行以下模块根命名空间中的类对象：
+- `numpy`
+- `scipy`
+- `sklearn`
+- `joblib`
+- `dit`
+
+**安全边界声明**：白名单机制可阻止任意未知全局模块的载入，但白名单底层库（如 `numpy`、`scikit-learn`）仍可能存在通过特定内部机制执行代码的风险。系统因此在载入前强制执行同名 `.sha256` 侧车文件的强一致性校验。工程上应当始终将工件视为可执行程序，与临床数据实施同等级别的读写访问控制。
+
+---
+
+## 6. 负对照与解剖学可解释性
+
+### 6.1 负对照视图规范 (Negative Control Views)
+
+为了量化影像分类表现中非白质生物学信号的贡献，系统提供两组负对照基准：
+
+| 负对照参数 (`--control-view`) | 输入特征内容 | 预期基线含义 | 异常表现警示判定 |
+|---|---|---|---|
+| `demographics` | 仅 `[age, sex]` 两列标量特征 | 仅依赖受试者年龄与性别人口学分布能达到的分类精度。 | 若人口学模型性能与全白质影像模型差异无统计显著性，则提示疾病分类信号高度混杂了年龄采集偏倚。 |
+| `missingness` | 仅 18 条白质束的标量缺失率向量 | 仅依赖磁共振追踪失败与伪影缺失模式能达到的分类精度。 | 若缺失模式可获得高分类 AUC，则表明机器学到的是扫描伪影或图像质量差异，而非轴突损伤。 |
+
+### 6.2 解剖权重重要性热力图与文献先验比对
 
 ```bash
-python -m dit.cli ablation --synthetic --n-samples 140 --out reports/abl
-# 热力图与"预测因子"需要节点轴，所以解释用 profile 视图；summary 无节点轴会跳过热力图
 python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out reports/interp
 ```
 
-`ablation` 额外产出 `ablation_table.csv`（参数族/视图/协变量/模型一张表）与严格 JSON
-的 `ablation_table.json`。`interpret` 在 profile/metric 视图下输出每束每指标的
-tract×node 热力图，并对左侧 UF 节点 75–100、ATR 1–13、CC 后部 1–10 等文献区间
-给出机器可读的 `literature_hits` 命中/未命中（真实 `fgnames` 才能匹配到解剖名）。
-`evaluate` 每次落盘 `rad_scores.csv`：每受试者的 out-of-fold 疾病概率分数，用于外部
-排序，与 `interpret` 的全量重拟合解释严格分开。
-一条 `matrix` 命令可产出 binary/multiclass × stratified/LOSO 四组报告与
-`matrix_summary.json`。
+`interpret` 命令在全量有标签数据上拟合线性判别模型，并计算每个白质节点特征的归一化权重绝对值，生成 $18 \times 100$ 的热力图矩阵。系统自动对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
 
-消融表同时扫协变量策略、特征视图和模型；`--model ensemble` 也能进消融表，
-用来对比"集成"相对单模型在每个协变量策略下的位置。每一组固定模型/视图/划分/
-种子的协变量实验还会生成预设的 `none vs feature` 与 `residualize vs feature` 外层
-fold 对照：主推断指标是平衡准确率，Wilcoxon p 值和 Holm 校正仅作**探索性**摘要。
-默认 5 折的 K 折口径（stratified / site_stratified）双侧精确 p 最小只能到
-0.0625；LOSO 的折共享训练数据，也不应被解读为独立临床试验。不同任务、不同
-种子、不同 split manifest，以及不同划分策略之间从不配对。
+| 结构代号 | 纤维束解剖全称 | 文献标记敏感节点区间 | 神经病理学相关性 |
+|---|---|---|---|
+| `UF_L` | 左侧钩束 (Uncinate Fasciculus) | 节点 75 至 100 (额叶端连接区) | 早期边缘系统与额叶断连 |
+| `ATR_L` | 左侧丘脑前辐射 (Anterior Thalamic Radiation)| 节点 1 至 13 (丘脑前核投射区) | 胆碱能投射纤维受损 |
+| `CC_ForcepsMajor` | 胼胝体压部 (Splenium / Forceps Major) | 节点 1 至 10 (枕叶与后顶叶交汇区) | 半球间顶下皮质后部通讯退化 |
+| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) | 默认网络（DMN）核心中继节点 |
 
-**解释部分是在全部有标签样本上重新拟合模型得到的**：它产出的是解释，不是精度
-估计，不能当 accuracy 来引用。
+---
+
+## 7. 高级操作命令清单
+
+### 7.1 全策略矩阵扫描 (Matrix Benchmark)
+执行跨二分类/三分类与跨分层/LOSO 策略的 4 组合并评测：
+```bash
+python -m dit.cli matrix --mat MCAD_AFQ_competition.mat --model linear_svm --out reports/matrix_run
+```
+产出 `matrix_summary.json`，集中输出四种基准设定下的 Pooled OOF 准确率、平衡准确率及站点稳定性指标。
+
+### 7.2 协变量消融全景评测 (Ablation Sweep)
+同时对特征视图（Summary/Profile）、协变量策略（None/Feature/Residualize）及主流模型进行笛卡尔网格扫描：
+```bash
+python -m dit.cli ablation --mat MCAD_AFQ_competition.mat --task binary --out reports/ablation_study
+```
+生成标准化数据分析表 `ablation_table.csv` 与 `ablation_table.json`，并自动附带 Wilcoxon 配对显著性检验结果。

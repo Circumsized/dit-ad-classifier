@@ -1,21 +1,62 @@
-# LICENSE status
+# 软件许可与知识产权合规备忘录 (LICENSE & INTELLECTUAL PROPERTY RECORD)
 
-The repository owner chose **MIT** on 2026-10-07. A `LICENSE` file with the
-full MIT text now sits at the repository root and `pyproject.toml` declares
-`license = { file = "LICENSE" }`, so metadata and file agree.
+**文档类型：法律合规与许可状态登记 (Legal Compliance Record)**  
+**当前状态：全部决议闭环 (Fully Resolved)**  
+**最新确认日期：2026-10-09**
 
-## Copyright holder (resolved)
+本文件记录本仓库代码的开源许可授予、版权所有权归属及外部衍生数据使用边界。
 
-The owner confirmed **Circumsized** as the copyright holder on 2026-10-08.
-The `Copyright (c) 2026 Circumsized` line in `LICENSE` is final; the
-placeholder from the initial MIT draft is gone.
+---
 
-## Provenance note
+## 1. 软件代码许可状态 (Software License)
 
-This code originated as a course submission for the AI4AD AFQ Alzheimer's
-classification competition (`docs/OPTIMIZATION_PLAN.md` records that history).
-Choosing MIT does not grant any rights to the AI4AD dataset itself, which is
-distributed separately by its organisers under its own terms; no `.mat` data is
-stored in this repository. The 2020 code archived under
-`legacy/afq2020_reference/` is the owner's own code (confirmed 2026-10-09),
-so the MIT LICENSE covers it as well.
+本仓库维护的全部源代码依据 [MIT 许可证](../LICENSE) 开放分发。
+
+```
+代码资产归属与许可覆盖拓扑:
+
+[ 仓库全量代码资产 ]
+       │
+       ├── dit/ (现代核心生产代码库) ────────────────────► [ MIT License ]
+       │                                                    版权所有 (c) 2026 Circumsized
+       ├── configs/ (声明式配置文件) ────────────────────► [ MIT License ]
+       │
+       ├── tests/ (自动化测试用例套件) ──────────────────► [ MIT License ]
+       │
+       ├── legacy/ (2020 课程作业归档脚本) ──────────────► [ MIT License ]
+       │
+       └── legacy/afq2020_reference/ (2020 上游代码归档) ──► [ MIT License ]
+           (经所有者于 2026-10-09 确认为本人原创作品，由根目录 MIT 许可统一覆盖)
+```
+
+### 1.1 版权声明历史决议
+- 初始草案中的占位符 `<COPYRIGHT-HOLDER-TO-BE-CONFIRMED>` 已于 2026-10-08 彻底移除。
+- 根目录 `LICENSE` 文件已锁定法定版权声明：`Copyright (c) 2026 Circumsized`。
+- `pyproject.toml` 中的打包元数据同步声明 `license = { file = "LICENSE" }`。
+
+---
+
+## 2. 外部数据集使用边界与合规声明 (Data Provenance Boundary)
+
+```
+软件代码与临床影像数据权限边界:
+
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 本仓库 (dit-ad-classifier)                                  │
+ │  - 包含: 算法实现、特征提取流水线、神经网络模型、测试套件   │
+ │  - 依据: MIT 开源许可证自由使用与修改                       │
+ └─────────────────────────────────────────────────────────────┘
+                               ▲
+                       严格权限与物理隔离
+                               ▼
+ ┌─────────────────────────────────────────────────────────────┐
+ │ 外部医学影像数据集 (AI4AD / YongLiuLab)                     │
+ │  - 包含: MCAD_AFQ_competition.mat, 受试者 DTI 扩散参数     │
+ │  - 属性: 受控临床研究数据，需单独向主办方申请使用授权       │
+ │  - 约束: MIT 许可证不授予任何该数据集的使用、分发或许可权利 │
+ └─────────────────────────────────────────────────────────────┘
+```
+
+1. **无私有数据分发**：本代码仓库不包含、不托管、亦不分发任何真实的 AI4AD 受试者 `.mat` 矩阵文件。
+2. **测试与开发数据**：内置测试套件与演示命令均使用 `dit.data.synthetic` 生成的确定性数学模拟数据，不包含任何真实患者的受保护健康信息（Protected Health Information, PHI）。
+3. **独立数据授权**：任何使用真实临床数据复现或训练本模型的实体，须自行遵守数据提供方（中科院自动化所及相关合作医院中心）的数据访问与伦理审查协议。
