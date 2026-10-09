@@ -1,192 +1,200 @@
-# W0 Frozen Benchmark Specification
+# W0 冻结实验基准规范协议 (FROZEN EXPERIMENT SPECIFICATION)
 
-**Protocol Specification**  
-**Status: ACTIVE**  
-**Version: dit v0.2.0**  
-**Last Revised: 2026-10-08**
+**文档类型：工程规范标准协议 (Normative Engineering Specification)**  
+**当前状态：生效锁定 (ACTIVE & FROZEN)**  
+**冻结版本：dit v0.2.0**  
+**最新修订日期：2026-10-08**
 
-This specification defines the experimental boundaries, data isolation rules, hyperparameter search limits, and statistical testing standards for model comparisons in `dit`. Official reports and submissions must link to this specification. Any run outside these parameters is classified as exploratory.
+本规范定义模型性能对比的强制性实验边界、数据访问协议、候选搜索上限与统计检验规则。所有正式学术报告与竞赛提交结果必须显式关联本规范版本。不符合本规范的实验运行统一定性为开发探索（Exploratory Analysis）。
 
 ---
 
-## 1. Evaluation Tracks
+## 1. 评估双轨拓扑与实验协议
 
-Two orthogonal tracks evaluate different generalization targets. Results from Track A and Track B must never be averaged into a single score.
+系统设立两条正交评估轨道。两轨测量完全不同的泛化误差，严禁将两轨结果合并为单一加权分数。
 
 ```
-Evaluation Tracks:
-
-                         Model M under Evaluation
-                                    |
-         +--------------------------+--------------------------+
-         |                                                     |
-         v                                                     v
-[ Track A: Competition Benchmark ]            [ Track B: Domain Generalization ]
-Target: Within-distribution discriminability  Target: Zero-shot transfer to unseen scanners
-Split:  --strategy stratified (5-fold)        Split:  --strategy loso (S-fold)
-         |                                                     |
-         v                                                     v
-[ Inner CV: StratifiedKFold ]                 [ Inner CV: Site-Grouped Holdout ]
-Search best C / params on training folds      Hold out one qualified site from train split
-         |                                                     |
-         v                                                     v
-[ Primary Metric: Outer OOF Argmax Accuracy ] [ Primary Metric: Pooled OOF Balanced Acc ]
-Auxiliary: Macro F1, AUC, Sensitivity, Spec   Auxiliary: Macro mean across sites, worst site
++---------------------------------------------------------------------------------------------+
+|                                实验评估双轨拓扑与协议分流                                    |
+|                                                                                             |
+|                                  待评估模型候选方案 M                                       |
+|                                           │                                                 |
+|                 +-------------------------+-------------------------+                       |
+|                 |                                                   |                       |
+|                 v                                                   v                       |
+|   [ 轨道 A: 竞赛基准复现轨 ]                         [ 轨道 B: 多中心域泛化轨 ]             |
+|   - 科学目标: 混合分布内受试者判别能力               - 科学目标: 未见扫描中心硬件迁移下界   |
+|   - 外层分割: --strategy stratified (5 折)           - 外层分割: --strategy loso (7 折)     |
+|   - 分割特性: 各折保持完全相同的类别比例             - 分割特性: 留出单个采集中心全量受试者 |
+|                 │                                                   │                       |
+|                 v                                                   v                       |
+|   [ 内层调优: 类分层 StratifiedKFold ]               [ 内层调优: 站点整留出验证 ]           |
+|   - 搜索参数: 正则化强度 C, 学习率                   - 调度机制: 留出训练折内首个完备中心   |
+|                 │                                                   │                       |
+|                 v                                                   v                       |
+|   [ 主指标: 外层 OOF Argmax 准确率 ]                 [ 主指标: 外层 Pooled OOF 平衡准确率 ] |
+|   - 辅助指标: Macro-F1, ROC-AUC, 敏感度/特异度       - 辅助指标: 逐中心准确率, 最差中心表现 |
++---------------------------------------------------------------------------------------------+
 ```
 
-### Track Comparison Matrix
+### 1.1 实验轨道定义对照矩阵
 
-| Property | Track A (Competition Benchmark) | Track B (Domain Generalization) | Exploratory (Site-Stratified) |
+| 评估属性 | 轨道 A (Track A: 竞赛基准复现轨) | 轨道 B (Track B: 跨中心域泛化轨) | 探索轨 (Exploratory: 站点平衡折) |
 |---|---|---|---|
-| **Scientific Question** | Under the pooled scanner distribution, can NC and AD be distinguished? | How well does the model generalize to completely unseen scanner hardware? | Does the model maintain stable performance when scanner proportions are equal across folds? |
-| **Outer Splitter** | `stratified_kfold_indices` (5 folds) | `leave_one_site_out` (S folds) | `site_stratified_kfold_indices` (5 folds) |
-| **Inner Tuning** | Class-stratified inner folds (`inner_cv: "class_stratified"`) | Site holdout within train set (`inner_cv: "site_grouped"`) | Class-stratified inner folds (`inner_cv: "class_stratified"`) |
-| **Primary Metric** | Outer OOF Argmax Accuracy | Pooled OOF Balanced Accuracy | Pooled OOF Balanced Accuracy |
-| **Auxiliary Metrics** | Macro F1, ROC-AUC, Sensitivity, Specificity | Per-site Balanced Accuracy, Site Macro Mean, Worst Site | Per-fold Balanced Accuracy, Class Coverage |
-| **Official Benchmark Status** | **Primary Reportable** | **Primary Reportable** | **Exploratory / Sensitivity Only** |
+| **核心科学问题** | 在已知扫描中心联合分布下，模型区分 NC 与 AD 的判别界限为何？ | 在未见扫描中心（零样本域迁移）下，模型的泛化下界为何？ | 消除各折间扫描中心构成波动后，模型的同一分布估计鲁棒性为何？ |
+| **外层分割算法** | `stratified_kfold_indices` (5 折) | `leave_one_site_out` (S 折) | `site_stratified_kfold_indices` (5 折) |
+| **内层超参调优** | 类分层交叉验证 (`inner_cv: "class_stratified"`) | 站点留出验证 (`inner_cv: "site_grouped"` 或回退) | 类分层交叉验证 (`inner_cv: "class_stratified"`) |
+| **主评价指标** | 外层 OOF Argmax 准确率 (Accuracy) | 外层 Pooled OOF 平衡准确率 (Balanced Accuracy) | 外层 Pooled OOF 平衡准确率 (Balanced Accuracy) |
+| **辅助评价指标** | Macro-F1, ROC-AUC, 敏感度, 特异度 | 逐中心平衡准确率, 最差中心准确率, 中心宏均值 | 逐折平衡准确率, 类别覆盖完整度 |
+| **正式基准资格** | **允许** 作为主基准表引用 | **允许** 作为主基准表引用 | **仅允许** 作为鲁棒性验证附表引用 |
 
 ---
 
-## 2. Label Encodings & Probability Specifications
+## 2. 标签编码映射与概率单纯形规范
+
+系统实现标准分层标签映射体系，完全杜绝全局类名与二分类类名的混用。
 
 ```
-Label Encoding Pipeline:
-
-[ Raw Input (MAT file) ]
-  y_raw in {1, 2, 3}  (1 = NC, 2 = MCI, 3 = AD)
-         |
-         v (canonicalize_labels)
-[ Canonical Labels ]
-  y_canon in {0, 1, 2}  (0 = NC, 1 = MCI, 2 = AD)
-         |
-         +-------------------------------------+
-         |                                     |
-         v (task = "binary")                   v (task = "multiclass")
-[ Filter MCI, remap to binary ]         [ Preserve all 3 classes ]
-  y_view in {0, 1}                        y_view in {0, 1, 2}
-  0 = NC (Normal Control)                 0 = NC, 1 = MCI, 2 = AD
-  1 = AD (Alzheimer's Disease)            Output Shape: (N, 3)
-  Output Shape: (N, 2)
++---------------------------------------------------------------------------------------------+
+|                                标签映射管道与维度流向图                                     |
+|                                                                                             |
+|   [ 官方原始数据标签 (MAT 文件) ]                                                           |
+|     y_raw ∈ {1, 2, 3}  (1 = NC 正常对照, 2 = MCI 轻度认知障碍, 3 = AD 阿尔茨海默病)         |
+|            │                                                                                |
+|            v (dit.data.schema.canonicalize_labels)                                          |
+|   [ 标准规范编码 (Canonical Labels) ]                                                       |
+|     y_canon ∈ {0, 1, 2}  (0 = NC, 1 = MCI, 2 = AD)                                          |
+|            │                                                                                |
+|            +------------------------------------+                                           |
+|            |                                    |                                           |
+|            v (任务: task = "binary")            v (任务: task = "multiclass")               |
+|   [ 二分类重编号视图 ]                   [ 三分类全量视图 ]                                 |
+|     过滤掉 MCI (原 1)                    保持所有 3 个类别标签                              |
+|     0 = NC (正常对照)                    0 = NC, 1 = MCI, 2 = AD                            |
+|     1 = AD (阿尔茨海默病)                                                                   |
+|     输出概率矩阵维度: ℝ^(N × 2)           输出概率矩阵维度: ℝ^(N × 3)                        |
++---------------------------------------------------------------------------------------------+
 ```
 
-1. **Class Names**: All reports must derive class names from `view.label_map`. In binary tasks, class 1 is strictly `AD`. Using the 3-class map for binary evaluation (which would mislabel class 1 as `MCI`) is rejected.
-2. **Probability Shape**: Output probability matrices have exactly $K$ columns. Column $k$ corresponds to canonical class $k$.
-3. **Missing Class Policy**: If a training fold lacks any class, execution aborts with `ValueError`. Zero-padding unobserved classes is prohibited.
+### 2.1 标签与概率单纯形数学约束
+
+1. **类别名称绑定契约**：所有文本输出与度量计算必须直接自 `view.label_map` 提取。在二分类任务中，正类索引 $1$ 严格绑定为 `AD`，严禁使用三分类全局表将其错误标记为 `MCI`。
+2. **概率矩阵维度约束**：后验概率矩阵的列数必须严格等于当前任务的类别数 $K$：
+
+$$\mathbf{P} \in [0, 1]^{N \times K}, \quad \text{且满足 } \sum_{k=1}^K P_{i, k} = 1, \quad \forall i \in \{1, \dots, N\}$$
+
+3. **缺类直接拒绝**：若某训练折内缺少任一类别的样本，系统立即抛出 `ValueError` 中断执行，严禁通过全零填充伪造缺失类别的后验概率。
 
 ---
 
-## 3. Data Boundaries & Fingerprinting
+## 3. 数据隔离与数据快照指纹
 
-### Inductive vs Transductive Protocols
-- **Inductive Protocol**: Models must not access test fold features, labels, or metadata during training. Standard evaluation follows this protocol.
-- **Transductive Protocol**: Any operation utilizing unlabelled test statistics (such as dataset-wide ComBat batch correction or test-domain self-supervised learning) must be explicitly flagged and reported separately from inductive LOSO results.
+### 3.1 归纳协议 vs 转导协议
+- **归纳协议 (Inductive Protocol)**：模型在特征工程、降维、超参调优和训练全过程中，完全不可接触测试折的任何特征、标签或元数据。标准评测流程必须遵循归纳协议。
+- **转导协议 (Transductive Protocol)**：使用包含测试集无标签样本的统计量（例如全数据集 ComBat 批次效应校正、测试中心自监督对齐等）。转导实验必须显式单独声明，严禁与纯归纳 LOSO 实验混合比较。
 
-### Data Snapshot Hash (`data_digest`)
+### 3.2 数据快照散列指纹 (`data_digest`)
 
-To guarantee data consistency across runs, every experiment computes an order-sensitive SHA-256 digest:
+为了防止跨次运行之间的数据隐式变动，系统对外层折数据计算顺序敏感的 SHA-256 签名：
 
-$$\text{data\_digest} = \text{SHA256}(X \mathbin{\Vert} y \mathbin{\Vert} \text{site} \mathbin{\Vert} \text{covariates} \mathbin{\Vert} \text{feature\_names})$$
+$$\text{data\_digest} = \text{SHA256}\left( \mathbf{X} \mathbin{\Vert} \mathbf{y} \mathbin{\Vert} \mathbf{s} \mathbin{\Vert} \mathbf{Z} \mathbin{\Vert} \text{feature\_names} \right)$$
 
-Pairwise statistical tests between runs with mismatched `data_digest` values are automatically rejected.
-
----
-
-## 4. Run Budgets & Model Selection
-
-To prevent family-wise selection bias from post-hoc cherry-picking across multiple models, the maximum number of logical evaluation runs is capped at 24:
-
-```
-Evaluation Budget Architecture (Max 24 Runs):
-
- Phase A: Baselines & Controls (Max 8 runs)
- |-- Linear SVM (Summary & Profile views)
- |-- Logistic Regression (Summary & Profile views)
- |-- RBF SVM & Random Forest (Summary view)
- +-- Negative Controls: Demographics & Missingness
-         |
-         v (Select <= 2 best imaging candidates)
- Phase B: Mechanism Ablation (Max 4 runs)
- +-- Covariate comparison (None vs Feature vs Residualize) & feature selection
-         |
-         v
- Phase C: Domain Generalization (Max 4 runs)
- +-- 2 candidates evaluated under LOSO + 1 sensitivity seed check
-         |
-         v
- Phase D: Deep Learning & Ensembles (Max 5 runs)
- +-- Tract-Transformer (No alignment, CORAL, MMD, DANN) & dynamic ensemble
-         |
-         v
- Phase E: Delivery & Packaging (Max 3 runs)
- +-- 2 multiclass evaluations + 1 fit/predict end-to-end artifact validation
-```
-
-### Frozen Search Grids
-
-- **Linear SVM**: $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100, 1000\}$ (7 values)
-- **Logistic Regression**: $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100\}$, Penalty $\in \{\text{l1}, \text{l2}\}$ (12 configurations)
-- **Random Forest**: `max_depth` $\in \{4, 8, \text{None}\}$, `min_samples_split` $\in \{2, 5\}$ (6 configurations)
+任何跨模型对比运行，若两侧 `data_digest` 不一致，系统判定为不同数据快照，拒绝执行配对显著性检验。
 
 ---
 
-## 5. Development Selection vs Confirmatory Testing
+## 4. 实验候选运行预算 (Run Budget)
+
+为了控制多次模型挑选引起的多重假设检验偏差（Family-wise Model Selection Bias），正式比较实验设立逻辑运行次数上限（最多 24 次）。
 
 ```
-Selection vs Confirmation:
-
-[ Internal Dataset (700 subjects) ]
-         |
-         v (Run Phases A - D)
-[ Best Candidate M* ] ---------> Report metric as: "Optimistic Selection Score"
-         |
-         v (Freeze architecture, features, hyperparameters, and calibration)
-[ Locked Model Artifact: model.joblib ]
-         |
-         v (Single forward pass without feedback)
-[ Independent Holdout / Blind Test Set ]
-         |
-         v
-[ Confirmatory Generalization Metric ]
++---------------------------------------------------------------------------------------------+
+|                                24 次正式实验预算阶段流向图                                  |
+|                                                                                             |
+|   阶段 A: 强基线与负对照 (上限: 8 次)                                                       |
+|   ├── Linear SVM (Summary 与 Profile 视图)                                                  |
+|   ├── Logistic Regression (Summary 与 Profile 视图)                                         |
+|   ├── RBF SVM 与 Random Forest (Summary 视图)                                               |
+|   └── 负对照视图: Demographics 与 Missingness                                               |
+|           │                                                                                 |
+|           v (晋级保留 ≤ 2 个最优影像候选)                                                   |
+|   阶段 B: 机制消融实验 (上限: 4 次)                                                         |
+|   └── 扫描协变量策略 (None vs Feature vs Residualize) 与特征块选择                          |
+|           │                                                                                 |
+|           v                                                                                 |
+|   阶段 C: 域泛化与稳健性评测 (上限: 4 次)                                                   |
+|   └── 2 个候选分别执行 1 次 LOSO 评测与 1 次敏感度种子测试                                  |
+|           │                                                                                 |
+|           v                                                                                 |
+|   阶段 D: 深度架构与跨模型集成 (上限: 5 次)                                                 |
+|   └── Tract-Transformer (纯分类、CORAL、MMD、DANN) 与动态加权集成                           |
+|           │                                                                                 |
+|           v                                                                                 |
+|   阶段 E: 任务扩展与生产交付 (上限: 3 次)                                                   |
+|   └── 2 次三分类扩展 + 1 次 Fit/Predict 端到端工件签名闭环验收                              |
++---------------------------------------------------------------------------------------------+
 ```
 
-1. **Selection Bias**: Evaluating multiple models on internal cross-validation and reporting the maximum produces optimistic estimates. Internal metrics must be labeled as selection scores.
-2. **Confirmatory Testing**: Only metrics evaluated on an independent external cohort or blind test set with a frozen model artifact count as confirmatory evidence.
+### 4.1 超参数搜索空间冻结
+
+所有经典模型的网格搜索范围预先硬编码于 `dit.models.classical`，未经规范修订不得擅自扩展：
+- **Linear SVM**:
+  
+$$C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100, 1000\}$$
+
+- **Logistic Regression**:
+  
+$$C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100\}, \quad \text{Penalty} \in \{\text{l1}, \text{l2}\}$$
+
+- **Random Forest**:
+  
+$$\text{max\_depth} \in \{4, 8, \text{None}\}, \quad \text{min\_samples\_split} \in \{2, 5\}$$
 
 ---
 
-## 6. Pre-Registration Schema
+## 5. 模型选择与外部确认分离 (Selection vs Confirmation)
 
-Before running formal experiments, register the configuration:
-
-```text
-Data Digest (SHA-256):       [64-character hex string]
-Task:                        [binary | multiclass]
-Strategy:                    [stratified | loso | site_stratified]
-Feature View:                [summary | profile | FA | MD]
-Covariate Strategy:          [feature | residualize | none]
-Inner Metric:                [balanced_accuracy]
-Primary Seed:                [42]
-Software Environment:        [NumPy, Scikit-Learn, and PyTorch versions]
+```
++---------------------------------------------------------------------------------------------+
+|                                开发集探索与外部确认分离拓扑                                 |
+|                                                                                             |
+|   [ 内部完整数据集 (700 名受试者) ]                                                         |
+|                 │                                                                           |
+|                 v (执行阶段 A 至 D 完整实验探索)                                            |
+|   [ 阶段最优模型方案 M* ] ────────────────► 报告指标必须定性为: "开发选择集估计"             |
+|                 │                                                                           |
+|                 v (完全冻结神经网络权重、超参、特征工程配置与校准参数)                     |
+|   [ 固化生产模型工件 artifact.joblib ]                                                      |
+|                 │                                                                           |
+|                 v (单次盲测前向推理，无任何指标反馈循环)                                    |
+|   [ 独立未见测试队列 / 竞赛官方盲测保留集 (Blind Test Set) ]                                |
+|                 │                                                                           |
+|                 v                                                                           |
+|   [ 外部确认泛化性能 (Unbiased Confirmatory Performance) ]                                  |
++---------------------------------------------------------------------------------------------+
 ```
 
----
-
-## 7. Stop & Rejection Criteria
-
-An evaluation run is immediately rejected under any of the following conditions:
-1. **Contract Failure**: NaNs present in processed features, labels out of bounds, or scanner IDs invalid.
-2. **Artifact Dominance**: The `missingness` negative control matches or exceeds the imaging model accuracy, indicating the classifier is exploiting imaging artifacts rather than pathology.
-3. **Single-Site Overfit**: A model improves on only one scanner site in LOSO but degrades across all others.
-4. **Power Floor Violation**: Any claim of statistically significant pairwise differences ($p < 0.05$) under standard 5-fold CV (mathematical lower bound is $p \ge 0.0625$).
+1. **选择集乐观偏差**：在同一批受试者上多次评估多种算法并挑选最优分数的行为，会导致所选模型的交叉验证分数系统性高于真实泛化表现。因此内部数据得分统一标记为“选择集估计”。
+2. **确认运行定义**：在模型体系、特征工程、超参数及校准策略完全冻结后，在独立的外部队列或官方盲测集上执行**单次前向推理**所获得的得分，方可定性为“外部确认指标”。
 
 ---
 
-## 8. Revision History
+## 6. 异常终止与实验否决规则
 
-| Date | Revision | Rationale |
+流水线遇到以下任一状态时立即熔断终止，并不产生最终有效输出：
+1. **数据契约异常**：发现 NaN 渗入最终特征矩阵、样本标签超出定义域、或扫描中心存在非法值。
+2. **负对照异常占优**：`missingness`（仅缺失模式）负对照模型的平衡准确率达到或超过影像特征模型，表明分类器拟合的是伪影而非神经解剖标志物。
+3. **单中心偏斜效应**：模型在 LOSO 评估中仅在单一中心取得增益，而在其余所有中心均出现退化，表明模型拟合了特定中心的硬件分布伪影。
+4. **统计功效违规**：在 5 折交叉验证下，任何声称配对差异显著且宣称 $p < 0.05$ 的报告直接作废（数学下界为 $p \ge 0.0625$）。
+
+---
+
+## 7. 规范修订历史记录
+
+| 版本日期 | 修订内容摘要 | 规范性依据与触发事件 |
 |---|---|---|
-| **2026-09-12** | W0 Protocol frozen. | Defined Track A / Track B separation, 24-run budget, and leakage prevention rules. |
-| **2026-09-12** | Track B site-aware inner CV added. | Enabled single-site holdout tuning for deep models under LOSO to match classical protocol. |
-| **2026-10-07** | `inner_cv` reporting fixed. | Exposed `inner_cv` field in fold tables to report holdout vs fallback status. |
-| **2026-10-08** | License placeholder resolved. | Confirmed MIT license held by Circumsized. |
-| **2026-10-08** | `site_stratified` registered. | Formally documented site-stratified K-fold as an exploratory stability metric. |
+| **2026-09-12** | W0 协议初版冻结生效。 | 建立 Track A / Track B 双轨模型，隔离超参数选择与测试集，规定 24 次运行上限。 |
+| **2026-09-12** | 深度路径站点感知内层选择更新。 | 实现深度模型在 LOSO 折下的训练中心整留出打分，消除深度评估协议差异标注。 |
+| **2026-10-07** | `inner_cv` 端到端报告字段披露修复。 | 报告导出层增加 `inner_cv` 标识，规范单中心整留出与 GroupKFold 多中心平均的方差定义。 |
+| **2026-10-08** | 移除许可证待决开放项。 | 所有者确认 MIT 许可证署名 Circumsized，法律状态收口。 |
+| **2026-10-08** | 登记第三种划分口径 `site_stratified`。 | 将站点分层 K 折纳入规范附表，界定其为稳健性探索口径，禁止与 Track A / Track B 混淆配对。 |

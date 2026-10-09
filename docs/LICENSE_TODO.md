@@ -1,63 +1,76 @@
-# License & Intellectual Property Provenance
+# 软件许可证与知识产权合规备忘录 (LICENSE & INTELLECTUAL PROPERTY RECORD)
 
-**Document Type: Legal & Compliance Record**  
-**Status: Resolved**  
-**Confirmed Date: 2026-10-09**
+**文档属性：法律合规与知识产权归属决议 (Compliance & IP Record)**  
+**当前状态：已决议闭环 (FULLY RESOLVED)**  
+**确认日期：2026-10-09**
 
-This document records the open-source licensing, copyright ownership, and dataset boundary agreements for `dit-ad-classifier`.
-
----
-
-## 1. Codebase License Grant
-
-All maintained source code in this repository is distributed under the [MIT License](../LICENSE).
-
-```
-Codebase Ownership Architecture:
-
-[ Repository Code Assets ]
-       |
-       |-- dit/ (Maintained package) ----------------------> [ MIT License ]
-       |                                                     Copyright (c) 2026 Circumsized
-       |-- configs/ (YAML configurations) -----------------> [ MIT License ]
-       |
-       |-- tests/ (Automated test suite) ------------------> [ MIT License ]
-       |
-       |-- legacy/ (2020 course submission scripts) -------> [ MIT License ]
-       |
-       +-- legacy/afq2020_reference/ (2020 upstream) ------> [ MIT License ]
-           (Confirmed as author's original work on 2026-10-09; covered under root MIT License)
-```
-
-### Copyright History
-
-- The draft placeholder `<COPYRIGHT-HOLDER-TO-BE-CONFIRMED>` was resolved on 2026-10-08.
-- Root `LICENSE` declares: `Copyright (c) 2026 Circumsized`.
-- `pyproject.toml` declares: `license = { file = "LICENSE" }`.
+本文件记录本仓库软件资产的开源许可授予、版权所有权归属以及外部临床医学影像数据的物理与法律隔离边界。
 
 ---
 
-## 2. Clinical Dataset Boundaries
+## 1. 软件代码资产许可架构
+
+本仓库维护的全部软件源代码均基于 [MIT 许可证](../LICENSE) 开放分发。
 
 ```
-Repository vs Dataset Isolation:
-
- +-------------------------------------------------------------+
- | Codebase (dit-ad-classifier)                                |
- |  - Source code, preprocessing, models, test harness         |
- |  - Permissive open-source usage under MIT License            |
- +-------------------------------------------------------------+
-                               ^
-                     Strict Air-Gap Boundary
-                               v
- +-------------------------------------------------------------+
- | Clinical Neuroimaging Dataset (AI4AD / YongLiuLab)          |
- |  - MCAD_AFQ_competition.mat, DTI diffusion measurements     |
- |  - Controlled clinical research data; requires organizer DUA|
- |  - MIT license grants zero rights to proprietary data       |
- +-------------------------------------------------------------+
++---------------------------------------------------------------------------------------------+
+|                                代码资产归属与许可覆盖拓扑图                                 |
+|                                                                                             |
+|   [ dit-ad-classifier 仓库全量代码资产 ]                                                    |
+|          │                                                                                  |
+|          ├── dit/ (核心生产逻辑包) ──────────────────────────► [ MIT 许可证 ]                |
+|          │                                                     版权所有 (c) 2026 Circumsized|
+|          ├── configs/ (实验参数配置文件) ────────────────────► [ MIT 许可证 ]                |
+|          │                                                                                  |
+|          ├── tests/ (自动化回归测试套件) ────────────────────► [ MIT 许可证 ]                |
+|          │                                                                                  |
+|          ├── legacy/ (2020 课程作业归档脚本) ────────────────► [ MIT 许可证 ]                |
+|          │                                                                                  |
+|          └── legacy/afq2020_reference/ (2020 上游归档) ──────► [ MIT 许可证 ]                |
+|              (经所有者于 2026-10-09 确认属于原创代码，由根目录 MIT 许可证统一覆盖)          |
++---------------------------------------------------------------------------------------------+
 ```
 
-1. **No Proprietary Data Distribution**: This repository does not host, distribute, or vendor real AI4AD patient `.mat` files.
-2. **Synthetic Evaluation**: Tests and demonstrations use synthetic data generated via `dit.data.synthetic`. Synthetic data contains zero Protected Health Information (PHI).
-3. **Data Access**: Users working with real clinical data are responsible for securing proper access and institutional review board (IRB) approvals from the dataset organizers (CASIA / YongLiuLab).
+### 1.1 版权声明历史决议
+
+1. **占位符清理**：初始草案中的占位符 `<COPYRIGHT-HOLDER-TO-BE-CONFIRMED>` 已于 2026-10-08 正式决议移除。
+2. **法定声明锁定**：根目录 `LICENSE` 文件已固化法定版权所有者声明：
+   ```text
+   Copyright (c) 2026 Circumsized
+   ```
+3. **打包元数据同步**：`pyproject.toml` 中的打包配置严格绑定许可文件：
+   ```toml
+   [project]
+   license = { file = "LICENSE" }
+   ```
+
+---
+
+## 2. 临床数据集权限隔离边界
+
+```
++---------------------------------------------------------------------------------------------+
+|                               软件代码与受控临床数据隔离模型                                 |
+|                                                                                             |
+|   +-------------------------------------------------------------+                           |
+|   | 开放软件代码资产 (dit-ad-classifier)                        |                           |
+|   |  - 包含: 算法实现、特征提取流水线、神经网络模型、测试套件   |                           |
+|   |  - 法律属性: 依据 MIT 开源许可证自由分发、修改与商业使用    |                           |
+|   +-------------------------------------------------------------+                           |
+|                                  ▲                                                          |
+|                           严格物理与法律隔离                                                |
+|                                  ▼                                                          |
+|   +-------------------------------------------------------------+                           |
+|   | 受控神经影像临床数据集 (AI4AD / YongLiuLab)                 |                           |
+|   |  - 包含: MCAD_AFQ_competition.mat, 受试者 DTI 扩散标量矩阵  |                           |
+|   |  - 法律属性: 受伦理与临床研究协议保护的数据，需单独申请授权 |                           |
+|   |  - 约束声明: MIT 许可证不授予任何该数据集的分发或许可权利   |                           |
+|   +-------------------------------------------------------------+                           |
++---------------------------------------------------------------------------------------------+
+```
+
+### 2.1 数据合规管理原则
+
+1. **无私有临床数据分发**：本代码仓库在任何提交历史与发布版本中，均**不包含、不托管、亦不分发**真实的 AI4AD 受试者 `.mat` 数据文件。
+2. **测试数据确定性合成**：所有内置自动化单元测试、持续集成流水线以及示例执行，均使用 `dit.data.synthetic` 模块程序化生成的确定性伪随机矩阵。该合成数据不包含任何真实患者的受保护健康信息（Protected Health Information, PHI）。
+3. **外部数据访问职责**：研究人员使用真实临床数据验证本系统时，须自行通过中国科学院自动化所等官方渠道申请学术访问权限，并遵循当地伦理审查委员会（IRB）之规定。
