@@ -1,282 +1,381 @@
-# Usage & Implementation Guide
+# dit 深度架构与高级用法技术手册 (USAGE)
 
-Technical reference for Tract-Transformer architecture, domain adaptation losses, post-hoc calibration, ensemble mechanics, and deployment pipelines in `dit`.
-
----
-
-## 1. Tract-Transformer Architecture
-
-Standard neuroimaging pipelines flatten 3D diffusion profiles into 1D vectors, destroying anatomical adjacency. `TractTransformer` preserves tract topology by modeling 18 white matter tracts as distinct spatial tokens.
-
-```
-Tract-Transformer Forward Pass & Attention Graph:
-
-Input: X in R^(B, 18, 100, M)
-Mask:  valid_mask in {0, 1}^(B, 18, 100)
-              |
-              v
-[ Flatten across nodes & metrics: D_in = 100 * M ]
-              |
-              v  H_0 in R^(B, 18, D_in)
-[ Linear Projection (D_in -> D_model) + Learned Positional Embeddings E_pos in R^(18, D_model) ]
-              |
-              v  Z_0 in R^(B, 18, D_model)
-+-------------------------------------------------------------+
-| Transformer Encoder Layer (x L layers)                      |
-|                                                             |
-|   Z'_{l-1} = LayerNorm(Z_{l-1})                             |
-|   A_l = Softmax( (Q K^T) / sqrt(D_k) + M_tract )            |  <-- M_tract: Attention mask
-|   Z~_l = MultiHeadAttention(Q, K, V) + Z_{l-1}              |
-|                                                             |
-|   Z_l = MLP(LayerNorm(Z~_l)) + Z~_l                         |
-+-------------------------------------------------------------+
-              |
-              v  Z_L in R^(B, 18, D_model)
-[ Masked Mean Pooling: h_pool = (sum_i Z_L[:, i, :] * m_i) / (sum_i m_i + eps) ]
-              |
-              v  h_pool in R^(B, D_model)
-      +-------+---------------------------------------+
-      |                                               |
-      v                                               v
-[ Classification Head ]                     [ Domain Adaptation Head ]
-Linear(D_model -> 1024)                     CORAL: Covariance Alignment
-ReLU() + Dropout(0.1)                       MMD:   Multi-Kernel MMD
-Linear(1024 -> N_classes)                   DANN:  Gradient Reversal Layer (GRL)
-      |                                               |
-      v                                               v
- Task Loss L_CE                              Alignment Loss L_align
-      |                                               |
-      +-----------------------+-----------------------+
-                              |
-                              v
-                    Total Loss: L = L_CE + gamma(t) * L_align
-```
-
-### Missing Tract Masking
-
-AFQ tractography occasionally fails on specific tracts due to imaging artifacts, producing all-NaN profiles. We handle this explicitly:
-1. All NaNs are zero-filled at input, and a boolean mask `valid_mask` tracks valid nodes.
-2. If all 100 nodes of a tract are missing, $M_{\text{tract}}$ injects $-\infty$ into the attention matrix, preventing other tracts from attending to the unobserved tract.
-3. The final mean pooling divides only by the count of observed tracts, avoiding magnitude shrinkage.
+本技术手册详述 `dit` 系统的底层数学形式、深度几何注意力神经网络、多中心无监督域对齐算法、事后概率校准以及生产部署签名反序列化安全边界。
 
 ---
 
-## 2. Multi-Site Domain Adaptation
+## 1. 白质几何注意力网络 (Tract-Transformer)
 
-Mini-batch alignment fails on multi-center data because a small batch ($B=16$) rarely contains balanced pairs from all 7 scanner sites. We accumulate representations across each epoch and compute alignment losses globally.
+传统医学影像分类常将多维扩散张量直接展平为一维向量，这种操作割裂了神经解剖学上的白质纤维束空间局部性与邻域连续性。`TractTransformer` 将 18 条白质纤维束视为图谱中的 18 个离散解剖学 Token，通过自注意力机制显式建模跨脑区长程连接结构。
 
-### Alignment Ramp Schedule
+```
++---------------------------------------------------------------------------------------------+
+|                     Tract-Transformer 前向计算流图与自注意力拓扑                              |
+|                                                                                             |
+|   输入数据张量: X ∈ ℝ^(B × 18 × 100 × M)      有效性掩码张量: mask ∈ {0, 1}^(B × 18 × 100)    |
+|                          │                                      │                           |
+|                          v                                      v                           |
+|   [ 局部节点与指标特征展开: D_in = 100 · M ]           [ 判定整束缺失: m_i = ∨_{j=1}^{100} mask_ij ] |
+|                          │                                      │                           |
+|                          v                                      │                           |
+|   [ 线性映射 Linear(D_in → D_model) ]                           │                           |
+|   [ 叠加解剖位置编码 E_pos ∈ ℝ^(18 × D_model) ]                  │                           |
+|                          │                                      │                           |
+|                          v                                      │                           |
+|   嵌入序列表示: Z_0 ∈ ℝ^(B × 18 × D_model)                       │                           |
+|                          │                                      │                           |
+|                          v                                      v                           |
+|   +-------------------------------------------------------------+                           |
+|   | 堆叠 Transformer 编码层 (L = 1, ..., N_layers)              |                           |
+|   |                                                             |                           |
+|   |   Z'_{l-1} = LayerNorm(Z_{l-1})                             |                           |
+|   |   A_l = Softmax( (Q K^T) / √D_k + M_attn )                  | <--- 缺失束注入 -∞ 偏置   |
+|   |   Z~_l = MultiHeadAttention(Q, K, V) + Z_{l-1}              |                           |
+|   |   Z_l = MLP(LayerNorm(Z~_l)) + Z~_l                         |                           |
+|   +-------------------------------------------------------------+                           |
+|                          │                                                                  |
+|                          v                                                                  |
+|   最终 Token 特征表示: Z_L ∈ ℝ^(B × 18 × D_model)                                           |
+|                          │                                                                  |
+|                          v                                                                  |
+|   [ 掩码归一化均值池化 (Masked Mean Pooling) ]                                              |
+|                          │                                                                  |
+|                          v                                                                  |
+|   受试者级全局特征向量: h_pool ∈ ℝ^(B × D_model)                                            |
+|                          │                                                                  |
+|         +----------------+--------------------------------+                                 |
+|         |                                                 |                                 |
+|         v                                                 v                                 |
+|   [ 临床诊断分类头 ]                                [ 多中心域适应对齐头 ]                  |
+|    Linear(D_model → 1024)                            CORAL / MMD / DANN 对齐损失            |
+|    ReLU() + Dropout(0.1)                                  │                                 |
+|    Linear(1024 → N_classes)                               │                                 |
+|         │                                                 │                                 |
+|         v                                                 v                                 |
+|    主任务损失 L_CE (加权交叉熵)                      分布对齐损失 L_align                   |
+|         │                                                 │                                 |
+|         +------------------------+------------------------+                                 |
+|                                  |                                                          |
+|                                  v                                                          |
+|                      全局目标函数: L = L_CE + γ(t) · L_align                                |
++---------------------------------------------------------------------------------------------+
+```
 
-Alignment loss scales linearly over training to allow the classifier to learn discriminative features first:
+### 1.1 解剖缺失掩码算子 (Anatomical Missing Masking)
+
+在弥散磁共振成像中，受限于信噪比或特定解剖区域的水肿效应，纤维束追踪算法可能无法重建出某些受试者的特定纤维束，导致该束全段 100 个节点数据全部缺失（表现为 NaN）。系统在前向计算时执行以下确定性掩码操作：
+
+定义第 $i$ 条纤维束的二值有效性指示变量：
+
+$$m_i = \begin{cases} 1, & \text{若存在节点 } j \in \{1, \dots, 100\} \text{ 使得 } X_{b, i, j, :} \neq \text{NaN} \\ 0, & \text{若该纤维束全部节点均为 NaN} \end{cases}$$
+
+在构造多头自注意力权重矩阵时，引入解剖缺失屏蔽偏置矩阵 $M_{\text{attn}} \in \mathbb{R}^{18 \times 18}$：
+
+$$M_{\text{attn}}(i, j) = \begin{cases} 0, & \text{若 } m_j = 1 \\ -\infty, & \text{若 } m_j = 0 \end{cases}$$
+
+注意力计算方程表示为：
+
+$$A = \text{Softmax}\left( \frac{Q K^T}{\sqrt{D_k}} + M_{\text{attn}} \right)$$
+
+池化层仅在真实存在的解剖纤维束上求算术均值，有效防止由于全零填充导致的模长收缩：
+
+$$h_{\text{pool}} = \frac{\sum_{i=1}^{18} Z_{L, i} \cdot m_i}{\max\left(1, \sum_{i=1}^{18} m_i\right)}$$
+
+---
+
+## 2. 多中心分布域对齐数学形式 (Domain Adaptation)
+
+在 7 个中心的临床队列中，单个训练小批量（Mini-batch，例如 $B=16$）无法有效抽取到足够数量的中心对。在 Mini-batch 内计算中心间距离会导致统计估计方差发散。系统采用全 Epoch 表征聚合更新机制，在整个训练集遍历完成后计算多中心对齐矩阵。
+
+```
++---------------------------------------------------------------------------------------------+
+|                               对齐强度调度曲线与 Epoch 特征聚合流                            |
+|                                                                                             |
+|   对齐强度 γ(t)                                                                             |
+|    1.0 ┼───────────────────────────────/────────────────────────────────                    |
+|        │                              /                                                     |
+|        │                             / (预热调度: 学习率稳定后逐步介入域正则化)             |
+|        │                            /                                                       |
+|    0.0 ┼───────────────────────────/                                                        |
+|        +---------------------------+------------------------------------> Epoch t           |
+|        0                         T_ramp                                 T_max               |
++---------------------------------------------------------------------------------------------+
+```
+
+对齐调度权重函数定义为：
 
 $$\gamma(t) = \min\left(1.0, \frac{t + 1}{T_{\text{ramp}}}\right) \cdot \lambda_{\text{align}}$$
 
-```
-Alignment Ramp gamma(t):
+其中 $T_{\text{ramp}}$ 为预热周期（默认 10 个 Epoch），$\lambda_{\text{align}}$ 为目标对齐超参数。
 
- gamma(t)
- 1.0 +-----------------------/------------------------
-     |                      /
-     |                     / (Linear ramp over T_ramp epochs)
-     |                    /
- 0.0 +-------------------/
-     +-------------------+----------------------------> Epoch t
-     0                 T_ramp                         T_max
-```
+### 2.1 统计对齐损失函数
 
-### Loss Formulations
+#### A. CORAL (Correlation Alignment) 协方差对齐
+对齐源中心特征矩阵 $H_S \in \mathbb{R}^{n_S \times d}$ 与目标中心特征矩阵 $H_T \in \mathbb{R}^{n_T \times d}$ 的二阶统计量（协方差）：
 
-1. **CORAL (Correlation Alignment)**:
-   Penalizes distance between source covariance $C_S$ and target covariance $C_T$:
-   $$\mathcal{L}_{\text{CORAL}} = \frac{1}{4 d^2} \| C_S - C_T \|_F^2$$
+$$C_S = \frac{1}{n_S - 1} \left( H_S^T H_S - \frac{1}{n_S} (\mathbf{1}^T H_S)^T (\mathbf{1}^T H_S) \right)$$
 
-2. **MMD (Maximum Mean Discrepancy)**:
-   Measures distance between mean embeddings in Reproducing Kernel Hilbert Space (RKHS) using a multi-scale Gaussian RBF kernel mixture:
-   $$k(x, x') = \sum_{q=1}^Q \exp\left( -\frac{\|x - x'\|^2}{2 \sigma_q^2} \right)$$
-   $$\mathcal{L}_{\text{MMD}} = \frac{1}{n_S^2} \sum_{i,j} k(h_i^S, h_j^S) - \frac{2}{n_S n_T} \sum_{i,j} k(h_i^S, h_j^T) + \frac{1}{n_T^2} \sum_{i,j} k(h_i^T, h_j^T)$$
+$$C_T = \frac{1}{n_T - 1} \left( H_T^T H_T - \frac{1}{n_T} (\mathbf{1}^T H_T)^T (\mathbf{1}^T H_T) \right)$$
 
-3. **DANN (Domain Adversarial Training)**:
-   Inserts a Gradient Reversal Layer (GRL) between the feature extractor and site discriminator. Forward pass: $R(h) = h$. Backward pass: $\frac{\partial R}{\partial h} = -\gamma(t) \mathbf{I}$.
+$$\mathcal{L}_{\text{CORAL}} = \frac{1}{4 d^2} \| C_S - C_T \|_F^2$$
 
----
+其中 $\|\cdot\|_F$ 为矩阵 Frobenius 范数，$d$ 为隐层特征维度。
 
-## 3. In-Fold Model Selection & Tuning
+#### B. MMD (Maximum Mean Discrepancy) 多核最大均值差异
+利用高斯径向基核混合族构建再生核希尔伯特空间（RKHS），度量不同扫描中心的一阶均值嵌入距离：
 
-To ensure out-of-fold metrics are unbiased, all hyperparameter tuning is nested within outer training splits.
+$$k(x, x') = \sum_{q=1}^Q \exp\left( -\frac{\|x - x'\|^2}{2 \sigma_q^2} \right)$$
 
-```
-In-Fold Selection Decision Flow:
+$$\mathcal{L}_{\text{MMD}} = \frac{1}{n_S^2} \sum_{i=1}^{n_S} \sum_{j=1}^{n_S} k(h_i^S, h_j^S) - \frac{2}{n_S n_T} \sum_{i=1}^{n_S} \sum_{j=1}^{n_T} k(h_i^S, h_j^T) + \frac{1}{n_T^2} \sum_{i=1}^{n_T} \sum_{j=1}^{n_T} k(h_i^T, h_j^T)$$
 
-               Outer Training Split (N_train)
-                             |
-             +---------------+---------------+
-             |                               |
-             v                               v
-    Track A: Stratified             Track B: LOSO
-             |                               |
-             |                    Are there >= 2 sites in N_train
-             |                    covering all classes?
-             |                               |
-             |                  +------------+------------+
-             |                  v (Yes)                   v (No)
-             |          [ Site-Grouped Holdout ]  [ Stratified Fallback ]
-             |          inner_cv="site_grouped"   inner_cv="class_stratified"
-             |                  |                         |
-             +------------------+-------------------------+
-                                |
-                                v
-               Evaluate Balanced Accuracy on Inner Split
-                                |
-                                v
-               Select Best Hyperparameter theta*
-                                |
-                                v
-               Refit Model on Entire Outer Train Split
-                                |
-                                v
-               Record inner_cv in Fold Report
-```
+#### C. DANN (Domain Adversarial Training) 梯度反转对抗
+在特征抽取器 $G_f$ 与中心判别网络 $G_d$ 之间插入梯度反转层（Gradient Reversal Layer, GRL）：
 
-- **Classical Models**: Average balanced accuracy across inner K-Fold or GroupKFold splits.
-- **Deep Models**: Evaluate on a single qualified site-holdout slice to bound training compute. `inner_cv` records `"site_grouped"` if site holdout succeeded, or `"class_stratified"` if it fell back.
+前向计算为恒等映射：
+
+$$R(h) = h$$
+
+反向传播时将误差梯度反向放大：
+
+$$\frac{\partial R}{\partial h} = -\gamma(t) \mathbf{I}$$
+
+中心分类交叉熵目标定义为：
+
+$$\mathcal{L}_{\text{Domain}} = - \frac{1}{B} \sum_{b=1}^B \log P(s_b \mid h_b)$$
 
 ---
 
-## 4. Probability Calibration
+## 3. 嵌套模型选择与内层状态机
 
-Class-weighted cross-entropy distorts posterior confidence. Post-hoc calibration maps uncalibrated outputs to empirical probabilities on held-out splits.
+为保证外层验证指标无偏，超参数搜索（学习率、正则项权重 $C$、网络深度）严格限制在外层训练折包含的受试者内部。
 
 ```
-Split-Half Calibration Pipeline:
-
-Outer Training Split (N_train)
-       |
-       +---------------------------------------------+
-       |                                             |
-       v (80% Training Split)                        v (20% Calibration Split)
-[ Train Network Weights ]                     [ Locked & Frozen ]
- - Gradient descent with early stopping        - Never participates in early stopping
- - Features & domain alignment                 - Forward pass outputs raw logits
-       |                                             |
-       +------------------------------------+        |
-                                            v        v
-                                    [ Fit Calibration Parameters ]
-                                    - Temperature Scaling: Scalar T
-                                    - Sigmoid Mapping: One-vs-Rest Platt
-                                            |
-                                            v
-                                    [ Calibrated Model ]
-                                            |
-                                            v
-                                    Predict on Outer Test Split
++---------------------------------------------------------------------------------------------+
+|                               内层超参数决策状态机与协议分流                                |
+|                                                                                             |
+|                         [ 外层训练折数据集 D_train (N_train 样本) ]                         |
+|                                              │                                              |
+|                      +-----------------------+-----------------------+                      |
+|                      |                                               |                      |
+|                      v                                               v                      |
+|           [ Track A: Stratified ]                         [ Track B: LOSO ]                 |
+|                      │                                               │                      |
+|                      │                                 检查 D_train 内部各中心分布:         |
+|                      │                                 是否存在包含全部类别的中心?          |
+|                      │                                               │                      |
+|                      │                              +----------------+----------------+     |
+|                      │                              | (满足条件)                      | (不满足)
+|                      │                              v                                 v     |
+|                      │                    [ 站点整留出验证切片 ]            [ 回退分层留出 ] |
+|                      │                     (Site-Grouped Holdout)     (Stratified Fallback) |
+|                      │                              │                                 │     |
+|                      v                              v                                 v     |
+|       [ 标准分层 K 折评估切片 ]              [ 单中心留出验证评估 ]            [ 标准分层留出评估 ]  |
+|                      │                              │                                 │     |
+|                      +------------------------------+---------------------------------+     |
+|                                                     │                                       |
+|                                                     v                                       |
+|                                [ 计算内层验证切片平衡准确率 (BA) ]                          |
+|                                                     │                                       |
+|                                                     v                                       |
+|                                    [ 锁定最优超参数配置 θ* ]                                |
+|                                                     │                                       |
+|                                                     v                                       |
+|                                [ 在完整 D_train 上拟合最终模型 M(·; θ*) ]                   |
+|                                                     │                                       |
+|                                                     v                                       |
+|               [ 报告 inner_cv: "site_grouped" 或 "class_stratified" 状态标记 ]              |
++---------------------------------------------------------------------------------------------+
 ```
 
-### Methods
+### 3.1 经典流水线与深度流水线内层方差特性
 
-1. **Temperature Scaling (`temperature`)**:
-   Fits a single scalar $T > 0$ via L-BFGS to minimize negative log-likelihood:
-   $$P(y = k \mid z) = \frac{\exp(z_k / T)}{\sum_j \exp(z_j / T)}$$
-   Preserves Argmax rankings strictly. Classification boundaries do not move.
-
-2. **Multivariate Sigmoid (`sigmoid`)**:
-   Fits independent binary Platt logistics for each class followed by simplex projection:
-   $$q_k = \frac{1}{1 + \exp(-(A_k \cdot p_k + B_k))}, \quad P(y = k) = \frac{q_k}{\sum_j q_j}$$
-   Can alter class predictions. Requires $\ge 2$ positive and $\ge 2$ negative examples per class in the calibration split.
+两种流水线遵循相同的验证分流门控，但在估计方差上具有不同的数学特性：
+- **经典分类器路径**：执行完整的内层多折交叉验证（`GroupKFold` 或 `StratifiedKFold`），评价指标取所有内层切分的加权均值。
+- **深度分类器路径**：受限于神经网络的反向传播算力消耗，深度超参搜索按随机种子顺序抽取**首个合格的单中心留出切片**计算验证平衡准确率。在受试者较少的单中心上（例如仅 9 名受试者），单点验证分数的方差显著高于多折均值，因此深度模型搜索得到的 `best_params` 属于局部经验选择，不得过度外推其绝对优越性。
 
 ---
 
-## 5. Dynamic Ensemble
+## 4. 后验概率校准数学体系
 
-`--model ensemble` performs soft voting over diverse base estimators:
+使用类别加权交叉熵或非平衡采样时，分类器预测的 Softmax 概率倾向于向样本量较小的类别偏移，无法直接作为真实后验置信度使用。系统在训练折内划分双重独立验证集，拟合后验概率校准参数。
 
 ```
-In-Fold Weighted Soft Voting:
-
-Outer Train Split X_train
-       |
-       +-------------------+-------------------+-------------------+
-       |                   |                   |                   |
-       v                   v                   v                   v
-[ Linear SVM ]        [ Logistic Reg ]     [ Random Forest ]   [ Tract-Transformer ]
-       |                   |                   |                   |
-       v                   v                   v                   v
- Inner Score s_1     Inner Score s_2     Inner Score s_3     Inner Score s_4
-       |                   |                   |                   |
-       +-------------------+-------------------+-------------------+
-                                   |
-                                   v  Compute Weights: w_m = s_m / sum_j s_j
-                                   |
-Test Sample x ---------------------+-----------------------------------+
-                                   v                                   v
-             Collect Probabilities: P_1(x), P_2(x), P_3(x), P_4(x)
-                                   |
-                                   v
-             Ensemble Probability: P_ens(x) = sum_m w_m * P_m(x)
-                                   |
-                                   v
-             Prediction: y_hat = argmax P_ens(x)
++---------------------------------------------------------------------------------------------+
+|                                    双重留出校准拟合数据流                                   |
+|                                                                                             |
+|                         外层训练折数据集 D_train (N_train 个受试者)                          |
+|                                              │                                              |
+|                      +-----------------------+-----------------------+                      |
+|                      | (80% 样本)                                     | (20% 样本)           |
+|                      v                                               v                      |
+|           [ 主模型参数优化集 ]                             [ 独立无偏校准集 ]               |
+|            - 梯度反向传播计算                               - 冻结分类器主干权重            |
+|            - 早停收敛轮数监控 (Early Stopping)              - 绝对不参与早停监控            |
+|                      │                                               │                      |
+|                      v                                               v                      |
+|             得到未校准模型 M_raw ───────────────────────────────► 拟合后处理校准映射:       |
+|                                                                    ├── 温度缩放参数 T       |
+|                                                                    └── Platt 逻辑回归映射   |
+|                                                                              │              |
+|                                                                              v              |
+|                                                                    得到校准后模型 M_calib   |
+|                                                                              │              |
+|                                                                              v              |
+|                                                                     作用于外层测试折 X_test |
++---------------------------------------------------------------------------------------------+
 ```
 
-- **Dynamic Weighting**: Model weights $w_m$ reflect in-fold inner cross-validation performance. No global weighting across folds is allowed.
-- **Automatic Temperature Scaling**: When `tract_transformer` is included in the ensemble, temperature scaling is enabled automatically to prevent uncalibrated overconfident posteriors from dominating the vote.
+### 4.1 校准算法形式化
+
+#### A. 温度标量缩放 (Temperature Scaling)
+引入标量参数 $T > 0$，对模型输出的 Logits 向量 $z \in \mathbb{R}^K$ 执行尺度缩放：
+
+$$P(y = k \mid z; T) = \frac{\exp(z_k / T)}{\sum_{j=1}^K \exp(z_j / T)}$$
+
+通过在预留校准集上最小化负对数似然（NLL）凸优化目标求解参数 $T$：
+
+$$\min_{T > 0} \; -\frac{1}{N_{\text{calib}}} \sum_{i=1}^{N_{\text{calib}}} \log P(y_i \mid z_i; T)$$
+
+由于 $T$ 为正实数标量，对于任意类 $j, k$，若原始输出 $z_j > z_k$，则在任意 $T > 0$ 下均有 $P(y=j) > P(y=k)$。**该变换严格保持原始分类超平面与 Argmax 分类决策结果不变。**
+
+#### B. 多元 Sigmoid 向量校准 (Multivariate Sigmoid / Platt)
+针对每个类别 $k$ 独立拟合一对多逻辑回归参数 $(A_k, B_k)$，随后投影至概率单纯形：
+
+$$q_k = \frac{1}{1 + \exp\left(-(A_k \cdot p_k + B_k)\right)}$$
+
+$$P_{\text{calibrated}}(y = k) = \frac{q_k}{\sum_{j=1}^K q_j}$$
+
+该算法能够独立拉伸各个类别的概率间距，但**允许改变最终的 Argmax 类别决策结果**。校准集必须满足每个类别包含不少于 2 个正样本与 2 个负样本的硬性条件。
 
 ---
 
-## 6. Production Model Deployment
+## 5. 跨架构动态加权集成机制 (Ensemble Architecture)
+
+`--model ensemble` 将不同结构偏置的分类器（线性超平面、对数几率、正交决策树、几何深度注意力网络）进行折内软投票融合。
 
 ```
-Fit and Predict Pipeline:
-
-1. Training:
-   python -m dit.cli fit --mat data.mat --artifact artifacts/model.joblib
-   
-   - Fits chosen pipeline on all labeled data
-   - Writes model artifact: artifacts/model.joblib
-   - Generates SHA-256 sidecar: artifacts/model.joblib.sha256
-
-2. Inference:
-   python -m dit.cli predict --mat test.mat --artifact artifacts/model.joblib --out pred.csv
-   
-   - Step 1: Verify model.joblib matches model.joblib.sha256
-   - Step 2: Unpickle using restricted class allowlist
-   - Step 3: Verify input columns match frozen FeatureLayout
-   - Step 4: Generate predictions and class-wise probabilities
++---------------------------------------------------------------------------------------------+
+|                                  折内动态加权软投票机制                                     |
+|                                                                                             |
+|   外层训练折 X_train ───────────────────────────────────────────────────────────────────┐    |
+|          │                                                                              │    |
+|          ├────────────────────┬────────────────────┬────────────────────┬───────────────┤    |
+|          v                    v                    v                    v               │    |
+|   [ 线性支持向量机 ]     [ 逻辑回归 ]         [ 随机森林 ]         [ 3D Transformer ]   │    |
+|      Linear SVM           Logistic            Random Forest         (强制开启温度校准)  │    |
+|          │                    │                    │                    │               │    |
+|          v                    v                    v                    v               │    |
+|    内层分数: s_1        内层分数: s_2        内层分数: s_3        内层分数: s_4         │    |
+|          │                    │                    │                    │               │    |
+|          +--------------------+--------------------+--------------------+               │    |
+|                                         │                                               │    |
+|                                         v  计算折内归一化表决权重                       │    |
+|                               w_m = s_m / (Σ_j s_j)  (策略: inner_score)                │    |
+|                                         │                                               │    |
+|   外层测试样本 x ────────────────────────┼───────────────────────────────────────────────┤    |
+|                                         v                                               v    |
+|   收集各模型后验分布: P_1(x), P_2(x), P_3(x), P_4(x)                                         |
+|                                         │                                                    |
+|                                         v                                                    |
+|            计算加权合成概率: P_ens(x) = Σ_{m=1}^M w_m · P_m(x)                               |
+|                                         │                                                    |
+|                                         v                                                    |
+|            输出最终诊断预测: ŷ = argmax P_ens(x)                                             |
++---------------------------------------------------------------------------------------------+
 ```
 
-### Deserialization Security
+### 5.1 权重无偏计算定理
+模型权重 $w_m$ 完全依赖于当前外层训练折的**内层交叉验证平衡准确率**：
 
-Artifacts are verified against an SHA-256 sidecar file before unpickling. `dit.deployment.RestrictedUnpickler` restricts class resolution to:
-- `numpy`, `scipy`, `sklearn`, `joblib`, `dit`
+$$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner}, j}}$$
 
-Arbitrary module execution is rejected at the deserialization boundary. Always keep model artifacts under the same access control as the patient data.
+严禁使用跨折总体准确率进行全局加权。当集成组合中包含 `tract_transformer` 时，系统自动强制对其启用温度校准，防止未校准深度网络产生接近 $1.0$ 的极端置信度破坏投票平衡。
 
 ---
 
-## 7. Negative Control Views
+## 6. 生产模型导出与签名防篡改推理 (Deployment Lifecycle)
 
-Negative controls establish whether model predictions reflect white matter pathology or non-biological artifacts:
+交叉验证仅用于无偏估计泛化性能下界，并不产出可供交付的推理模型。生产模型交付由 `fit` 与 `predict` 构成完整闭环。
 
-| Control View | Features | Diagnostic Goal | Failure Condition |
+```
++---------------------------------------------------------------------------------------------+
+|                                生产模型导出与安全推理时序图                                 |
+|                                                                                             |
+|   [ 阶段 1: 生产模型拟合与哈希固化 ]                                                        |
+|   python -m dit.cli fit --mat data.mat --artifact artifacts/model.joblib                    |
+|          │                                                                                  |
+|          ├── 1. 载入全量有标签数据，执行完整折内特征工程流水线                              |
+|          ├── 2. 导出序列化模型二进制工件: artifacts/model.joblib                            |
+|          └── 3. 计算并写出单向侧车哈希文件: artifacts/model.joblib.sha256                   |
+|                                                                                             |
+|   [ 阶段 2: 盲测推理与防篡改反序列化 ]                                                      |
+|   python -m dit.cli predict --mat test.mat --artifact artifacts/model.joblib --out pred.csv|
+|          │                                                                                  |
+|          ├── 1. 签名核验: 计算工件实时 SHA-256 并与 .sha256 侧车完全匹配                    |
+|          ├── 2. 受限反序列化: RestrictedUnpickler 拦截非白名单命名空间                      |
+|          ├── 3. 特征矩阵重建: 依据工件固化的 FeatureLayout 解构盲测数据                     |
+|          ├── 4. 列契约校验: 特征列数必须严格等于 layout.total_features                      |
+|          └── 5. 导出结构化结果: 包含受试者 ID、预测编码、类名及后验概率矩阵                 |
++---------------------------------------------------------------------------------------------+
+```
+
+### 6.1 反序列化安全白名单机制
+
+为了防范恶意反序列化代码执行风险，`dit.deployment.RestrictedUnpickler` 将类加载空间严格限制于以下基础根命名空间：
+- `numpy`
+- `scipy`
+- `sklearn`
+- `joblib`
+- `dit`
+
+**安全边界规范**：白名单机制可有效阻止未知远程代码加载，但底层库中存在特定的辅助函数（例如 `numpy.testing._private.utils.runstring`），掌握本地写入权限的人员理论上仍可构造恶意利用。因此，系统在反序列化前强制执行同名 `.sha256` 侧车文件的强一致性校验。在生产环境中，模型工件必须与临床原始数据处于同等级别的物理访问控制下。
+
+---
+
+## 7. 负对照基准与神经解剖学可解释性
+
+### 7.1 负对照视图对照矩阵
+
+| 负对照参数 (`--control-view`) | 输入数据内容 | 预期基线含义 | 异常状态警示判定 |
 |---|---|---|---|
-| `--control-view demographics` | `[sex, age]` only | Measures signal obtainable from demographic distribution alone. | If demographic model matches imaging model accuracy, imaging features may be redundant with age distribution. |
-| `--control-view missingness` | 18 tract tracking missing rates | Measures signal obtainable from tracking failure patterns alone. | If missingness predicts diagnosis, model is learning imaging quality/artifacts rather than anatomy. |
+| `demographics` | 仅 `[age, sex]` 两列标量特征 | 仅依赖受试者生理年龄与性别分布所能达到的分类上限。 | 若人口学模型表现与影像特征模型差异不显著，说明分类器拟合的是受试者招募时的年龄偏倚而非病理。 |
+| `missingness` | 仅 18 条纤维束的标量追踪失败缺失率向量 | 仅依赖弥散磁共振追踪失败与伪影模式所能达到的分类精度。 | 若缺失率模型可达到较高分类 AUC，说明分类器学到的是成像设备质量差异伪影，而非神经退行性病变。 |
+
+### 7.2 解剖特征权重热力图与文献先验对照
+
+```bash
+python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out reports/interp
+```
+
+系统在全量有标签数据上拟合线性判别模型，提取各节点权重绝对值并生成 $18 \times 100$ 维度的热力图矩阵。系统自动检验并对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
+
+| 结构代号 | 白质纤维束解剖全称 | 文献标记敏感节点区间 | 神经病理学相关性 |
+|---|---|---|---|
+| `UF_L` | 左侧钩束 (Uncinate Fasciculus) | 节点 75 至 100 (额叶端连接区) | 早期边缘系统与额叶解剖断连 |
+| `ATR_L` | 左侧丘脑前辐射 (Anterior Thalamic Radiation)| 节点 1 至 13 (丘脑前核投射区) | 胆碱能投射纤维受损 |
+| `CC_ForcepsMajor` | 胼胝体压部 (Splenium / Forceps Major) | 节点 1 至 10 (枕叶与后顶叶交汇区) | 半球间顶下皮质后部通讯退化 |
+| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) | 默认网络（DMN）核心中继节点 |
 
 ---
 
-## 8. CLI Reference Table
+## 8. CLI 命令参数完整矩阵
 
-| Subcommand | Flag | Type | Default | Description |
+| 子命令 | 参数标志 | 字段类型 | 默认值 | 语义契约与底层约束 |
 |---|---|---|---|---|
-| `evaluate` | `--task` | string | `binary` | Classification task: `binary` (NC vs AD) or `multiclass` (NC vs MCI vs AD). |
-| | `--strategy` | string | `stratified` | Split strategy: `stratified`, `loso`, or `site_stratified`. |
-| | `--model` | string | `linear_svm` | Model: `linear_svm`, `logistic`, `random_forest`, `hist_gradient_boosting`, `adaboost`, `tract_transformer`, `ensemble`. |
-| | `--view` | string | `summary` | Feature representation: `summary` (576 dims) or `profile` (14,400 dims). |
-| | `--covariate` | string | `feature` | Covariate handling: `feature` (input as columns), `residualize` (OLS in-fold), `none` (dropped). |
-| | `--alignment` | string | `none` | Domain adaptation: `none`, `coral`, `mmd`, `dann`. |
-| | `--deep-calibration` | string | `none` | Calibration method: `none`, `temperature`, `sigmoid`. |
-| `fit` | `--artifact` | path | required | Output model path. Generates `<artifact>.sha256` sidecar automatically. |
-| `predict` | `--artifact` | path | required | Input model path. Validates SHA-256 sidecar before loading. |
-| | `--out` | path | required | Output prediction CSV path. |
-| `ablation` | `--model` | string | `linear_svm` | Sweeps covariate policies (`none`, `feature`, `residualize`) and outputs comparison table. |
-| `matrix` | `--model` | string | `linear_svm` | Runs full 2-task x 2-strategy benchmark grid and outputs `matrix_summary.json`. |
-| `interpret` | `--view` | string | `profile` | Generates 18x100 tract-node attribution heatmaps aligned with literature regions. |
+| `evaluate` | `--mat` | 文件路径 | `None` | MATLAB 格式矩阵文件路径（读取键：`train_set`, `train_diagnose` 等）。 |
+| | `--synthetic` | 标志位 | `False` | 启用确定性合成影像数据引擎，无需物理文件即可执行完整验证。 |
+| | `--task` | 枚举 | `binary` | 分类任务设定：`binary`（NC vs AD）或 `multiclass`（NC vs MCI vs AD）。 |
+| | `--strategy` | 枚举 | `stratified` | 划分策略：`stratified`（类别分层）、`loso`（留一中心）、`site_stratified`（中心均衡）。 |
+| | `--model` | 字符串 | `linear_svm` | 模型架构：可选 5 种经典分类器、`tract_transformer` 或 `ensemble`。 |
+| | `--view` | 字符串 | `summary` | 特征映射：`summary`（576 维几何统计）或 `profile`（14,400 维全节点展开）。 |
+| | `--covariate` | 枚举 | `feature` | 协变量策略：`feature`（作为列拼入）、`residualize`（折内 OLS 残差化）、`none`（完全丢弃）。 |
+| | `--alignment`| 枚举 | `none` | 深度多中心域适应对齐模式：`none`、`coral`、`mmd`、`dann`。 |
+| | `--deep-calibration`| 枚举 | `none` | 深度模型后验校准算法：`none`、`temperature`（温度缩放）、`sigmoid`（多元 Platt）。 |
+| | `--out` | 目录路径 | `reports` | 报告输出目录，生成 `evaluation.json` 与 `evaluation.md`。 |
+| `fit` | `--artifact` | 文件路径 | 必须指定 | 模型序列化导出路径。自动生成同名 `.sha256` 侧车哈希文件。 |
+| `predict` | `--artifact` | 文件路径 | 必须指定 | 模型输入路径。前置校验 SHA-256 签名，未通过则直接拒绝执行。 |
+| | `--out` | 文件路径 | 必须指定 | 结构化预测结果 CSV 导出路径。 |
+| `ablation` | `--model` | 字符串 | `linear_svm` | 执行协变量策略（none/feature/residualize）扫描，导出配对消融表。 |
+| `matrix` | `--model` | 字符串 | `linear_svm` | 批处理执行 2 任务 × 2 策略全景矩阵扫描，导出 `matrix_summary.json`。 |
+| `interpret` | `--view` | 字符串 | `profile` | 全量拟合模型，导出 $18 \times 100$ 解剖节点贡献热力图及文献对齐报告。 |

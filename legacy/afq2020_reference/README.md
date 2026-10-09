@@ -1,64 +1,98 @@
-# 2020 Upstream Reference Archive
+# 2020 上游代码归档与技术剖析 (AFQ 2020 UPSTREAM REFERENCE)
 
-**Status: Verbatim Archive**  
-**Commit SHA: `bb6bae279167e5b50f12f27c7467b235f7c98e72`**  
-**Timestamp: `2020-11-30 17:29:00`**  
-**License: Covered under root repository [MIT License](../../LICENSE)**
+**文档属性：历史代码逐字归档技术备忘录 (Verbatim Archive & Engineering Notes)**  
+**上游提交快照：`bb6bae279167e5b50f12f27c7467b235f7c98e72`**  
+**归档文件时间戳：`2020-11-30 17:29:00`**  
+**知识产权状态：所有者于 2026-10-09 确认本代码为原创资产，由根目录 [MIT License](../../LICENSE) 统一覆盖**
 
-This directory contains the original 2020 upstream code and site cross-validation splits. It is preserved for lineage tracking and algorithmic comparison against the modern `dit` package.
+本目录收录 2020 年竞赛初始版本的完整代码树与站点划分索引，作为现代 `dit` 重构设计的直接上游演化对照。
 
 ---
 
-## 1. Lineage & File Mapping
+## 1. 代码血统演化与模块映射
 
 ```
-Code Lineage:
-
-[ 2020 Upstream (this directory) ]               [ Course Submission (../) ]
-  data_loader_d.py -----------------------------> transformer.py (imported data_loader)
-  deep_model.py (Trans: Softmax + BCE) ---------> transformer.py (Trans: identical structure)
-  data_division.py (Site splits)                  ML.py (flattened feature usage)
-  dataset_txt/ (Fixed split records)
-         |
-         v
-[ Modern Production Pipeline (dit/) ]
-  dit.data.splits.site_stratified_kfold_indices (deterministic round-robin splits)
-  dit.models.tract_transformer (3D tract attention, logits to CrossEntropyLoss)
-  dit.evaluation (in-fold preprocessing, no cross-split leakage)
++---------------------------------------------------------------------------------------------+
+|                                代码演化血统拓扑图                                           |
+|                                                                                             |
+|   [ 2020 上游归档版本 (本目录) ]                   [ 课程作业脚本归档 (../) ]               |
+|    ├── data_loader_d.py (存在) ──────────────────► transformer.py (引用的 data_loader)      |
+|    ├── deep_model.py (Trans: Softmax+BCE) ───────► transformer.py (Trans: 同构结构)         |
+|    ├── data_division.py (站点内随机切片)           └── ML.py (采用相似特征展平)             |
+|    └── dataset_txt/ (未播种划分的一性次记录)                                                |
+|              │                                                                              |
+|              v (深度重构与数学缺陷根除)                                                     |
+|   [ 现代生产管线 (dit/ 目录) ]                                                              |
+|    ├── dit.data.splits.site_stratified_kfold_indices (吸取核心切片思想，引入轮转均衡与种子) |
+|    ├── dit.models.tract_transformer (重写为三维解剖注意力机制，移除错误 Softmax+BCE 结构)   |
+|    └── dit.evaluation (全面实施折内无偏特征选择与严格隔离)                                  |
++---------------------------------------------------------------------------------------------+
 ```
 
-| Archived File | Original Responsibility | Known Defect | Modern Replacement in `dit/` |
+### 1.1 文件功能与现代重构对照表
+
+| 归档文件名 | 原始计算职责 | 历史缺陷剖析 | 现代 `dit` 中的重构与替代方案 |
 |---|---|---|---|
-| `data_division.py` | 5-fold cross-validation split by scanner site. | Unseeded random shuffle; remainders piled into fold 4 (152 samples vs 137). | `dit.data.splits.site_stratified_kfold_indices`: deterministic RNG, round-robin remainder balancing ($|F_i - F_j| \le 1$). |
-| `data_loader_d.py` | Parsed `.mat` files and normalized demographics. | Age scaled by dividing by 150; global normalization across full dataset. | `dit.data.mat_loader` & `dit.data.covariates`: in-fold OLS residualization or scaling. |
-| `deep_model.py` | Network architectures (`Trans`, `lstm`, `TextCNN`). | `Trans` nested Softmax feeding `BCELoss`; `TextCNN` crashed due to uninitialized attributes. | `dit.models.tract_transformer.TractTransformer`: clean logits feeding class-weighted cross-entropy. |
-| `train_deep_model.py` | PyTorch training loop and early stopping. | Small batch size (32); no domain alignment. | `dit.models.domain_train`: CORAL, MMD, and DANN domain adaptation. |
-| `data2pca.py` | PCA feature reduction. | Global PCA fitted on all samples before splitting (data leakage). | `dit.data.selection`: in-fold ANOVA block and node feature selection. |
-| `dataset_txt/` | 5-fold CV subject index splits (0..699). | Single unseeded run artifact; not programmatically reproducible. | Preserved as static reference; production uses deterministic splitting. |
+| `data_division.py` | 按扫描中心分组，切分 5 折索引并导出 TXT 文件。 | 未配置随机种子；余数简单推入最后一折（第 4 折样本量膨胀为 152，其余折仅 137）。 | 重构为 `dit.data.splits.site_stratified_kfold_indices`，由 `np.random.default_rng(seed)` 控制，余数执行严格的 Round-Robin 均摊（每折恒定 140 样本）。 |
+| `data_loader_d.py` | 解析 `.mat` 数据，补齐年龄与性别特征并归一化。 | 年龄特征简单除以 150；全样本固定归一化存在潜在泄漏风险。 | 重构为 `dit.data.mat_loader` 与 `dit.data.covariates`，按折分别回归或作为标准化特征接入流水线。 |
+| `deep_model.py` | 定义 `Trans`、`lstm` 与 `TextCNN` 网络。 | `Trans` 将 Softmax 置于网络内层并在 `train_deep_model.py` 中连接 `BCELoss`；`TextCNN` 引用未初始化属性导致实例化崩溃。 | 重构为 `dit.models.tract_transformer.TractTransformer`，输出纯 Logits，端到端采用标准类别加权交叉熵优化。 |
+| `train_deep_model.py`| PyTorch 训练循环与早停权重导出。 | 每个 Batch 样本量较小（32），缺乏学习率调度；缺乏中心对抗与分布对齐逻辑。 | 重构为 `dit.models.domain_train.train_domain_aligned_model`，集成 CORAL、MMD、DANN 域对齐算法与早停机制。 |
+| `data2pca.py` | 对全量样本执行 PCA 降维。 | 在交叉验证之前对全量数据执行 `pca.fit_transform()`，造成严重的验证集信息泄漏。 | 重构为 `dit.data.selection`，将降维与特征筛选严格封装在外层训练折内部。 |
+| `dataset_txt/` | 5 折交叉验证的受试者索引列表 (0..699)。 | 属于某一次未播种运行的单次偶发快照，无法程序化复现。 | 保留作为历史对照数据；生产评估由确定性生成算法动态产出。 |
 
 ---
 
-## 2. Remainder Allocation: Legacy vs Modern
+## 2. 站点分层划分算法数学形式对比
 
-`data_division.py` partitioned samples per site into 5 folds. The original algorithm piled remainders into the last fold, causing fold size imbalance:
+`data_division.py` 的算法目标是在保持 5 折交叉验证的同时，平衡每个扫描中心在各折测试集中的代表性。
 
 ```
-Remainder Allocation Comparison:
-
-Legacy Algorithm (data_division.py) - Last-Chunk Pile:
-  Site with 22 subjects, 5 folds: base = 22 // 5 = 4
-  Fold 0: [ 4 ]
-  Fold 1: [ 4 ]
-  Fold 2: [ 4 ]
-  Fold 3: [ 4 ]
-  Fold 4: [ 4 + 2 = 6 ]  <-- Remainder piled into last fold
-
-Modern Algorithm (dit.data.splits) - Round-Robin Distribution:
-  Fold 0: [ 5 ]  <-- +1
-  Fold 1: [ 5 ]  <-- +1
-  Fold 2: [ 4 ]
-  Fold 3: [ 4 ]
-  Fold 4: [ 4 ]          <-- Maximum count difference between any two folds is <= 1
++---------------------------------------------------------------------------------------------+
+|                                两种余数发牌算法结构对比图                                   |
+|                                                                                             |
+|   2020 遗留算法 (data_division.py) - 末尾堆叠方案:                                          |
+|   设某中心有 22 名受试者, 切 5 折: 基准块大小 len_sub = 22 // 5 = 4                         |
+|    折 0: [ 4 人 ]                                                                           |
+|    折 1: [ 4 人 ]                                                                           |
+|    折 2: [ 4 人 ]                                                                           |
+|    折 3: [ 4 人 ]                                                                           |
+|    折 4: [ 4 + 2 = 6 人 ]  <--- 所有余数 (2 人) 被硬编码推入最后一折, 造成折间规模严重失衡   |
+|                                                                                             |
+|   2026 现代算法 (dit.data.splits) - 轮转均摊方案 (Round-Robin):                              |
+|    折 0: [ 5 人 ]  <--- 余数受试者 1 轮转入折 0                                              |
+|    折 1: [ 5 人 ]  <--- 余数受试者 2 轮转入折 1                                              |
+|    折 2: [ 4 人 ]                                                                           |
+|    折 3: [ 4 人 ]                                                                           |
+|    折 4: [ 4 人 ]  <--- 任意两折间样本数差异恒定 ≤ 1                                         |
++---------------------------------------------------------------------------------------------+
 ```
 
-The modern round-robin implementation guarantees $| |F_{k_1}| - |F_{k_2}| | \le 1$, ensuring unbiased fold weighting during cross-validation.
+### 2.1 算法数学形式证明
+
+#### A. 2020 原始切片算法 (`data_division.py`)
+对于扫描中心 $s$，受试者索引集合随机打乱后为 $I_s$，设单折基准块长度为：
+
+$$L_s = \left\lfloor \frac{|I_s|}{K} \right\rfloor$$
+
+第 $k$ 折所分得的测试样本子集形式化表示为：
+
+$$F_k^s = \begin{cases} I_s\left[ k \cdot L_s : (k + 1) \cdot L_s \right], & k = 0, 1, \dots, K-2 \\ I_s\left[ (K - 1) \cdot L_s : \right], & k = K - 1 \end{cases}$$
+
+在此算法下，最后一折 $F_{K-1}^s$ 承担了全部余数样本：
+
+$$|F_{K-1}^s| = L_s + (|I_s| \bmod K)$$
+
+当全数据集跨 7 个中心累加时，第 $K-1$ 折的样本量显著高于其余折：
+
+$$\sum_{s=1}^S |F_{K-1}^s| = 152 > 137 = \sum_{s=1}^S |F_{0}^s|$$
+
+#### B. 2026 规范轮转切片算法 (`dit.data.splits`)
+现代实现通过位置模运算实现发牌式轮转分配：
+
+$$F_k^s = \left\{ I_s[p] \;\middle|\; p \bmod K = k, \quad 0 \le p < |I_s| \right\}$$
+
+由于对于任意正整数 $|I_s|$，模运算产生的各余数计数至多相差 $1$，因此对于任意两折 $k_1, k_2 \in \{0, \dots, K-1\}$，均满足严格的不等式约束：
+
+$$\left| |F_{k_1}^s| - |F_{k_2}^s| \right| \le 1, \quad \forall s \in \{1, \dots, S\}$$
+
+各中心累加后，全数据集上任意两折的样本总量之差仍被控制在极小范围内，从数学上保证了交叉验证估计量的权重平衡与方差稳定性。

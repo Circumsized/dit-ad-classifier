@@ -1,411 +1,501 @@
 # dit-ad-classifier
 
-A minimal, reproducible pipeline for Alzheimer's Disease classification from Automated Fiber Quantification (AFQ) diffusion MRI tracts.
+基于弥散张量成像（DTI）自动化纤维束定量分析（AFQ）特征，实现阿尔茨海默病（AD）二分类与三分类判别的系统管线。
 
-We take raw tract profiles, extract clean features, run rigorous cross-validation without data leakage, and evaluate both classical baselines and a tract-native Transformer.
+---
+
+## 1. 系统核心架构与第一性原理
+
+系统输入为多中心弥散磁共振白质纤维束剖面数据。核心计算任务是将 4 维神经解剖学张量映射为疾病后验概率，在整个特征提取、模型训练与超参数搜索生命周期中严格杜绝泛化泄漏。
 
 ```
-+-----------------------------------------------------------------------------------+
-|                                 Input Pipeline                                    |
-|                                                                                   |
-|  Raw AFQ Profiles                        Clinical Metadata                        |
-|  X: (N, 18 tracts, 100 nodes, M metrics)  y: diagnosis (NC=1, MCI=2, AD=3)        |
-|                                          site: scanner ID (1..S)                  |
-|                                          covariates: [sex, age]                   |
-+-----------------------------------------+-----------------------------------------+
-                                          |
-                                          v
-+-----------------------------------------------------------------------------------+
-|                             Out-of-Fold Cross Validation                          |
-|                                                                                   |
-|  Stratified K-Fold            Site-Stratified K-Fold        Leave-One-Site-Out    |
-|  (class balance)              (site balance across folds)   (unseen site transfer)|
-+-----------------------------------------+-----------------------------------------+
-                                          |
-                     +--------------------+--------------------+
-                     |                                         |
-                     v (Train split only)                      v (Test split locked)
-+-----------------------------------------+   +-------------------------------------+
-|         In-Fold Transformations         |   |          Held-out Test            |
-|                                         |   |                                     |
-|  1. Impute: Median per node             |   |  Apply fitted transforms            |
-|  2. Smooth: Gaussian 1D kernel          |   |  No statistics recomputed           |
-|  3. Residualize: OLS against age, sex   |   |                                     |
-|  4. Project: Summary or Profile view    |   |                                     |
-+--------------------+--------------------+   +------------------+------------------+
-                     |                                           |
-                     v                                           |
-+-----------------------------------------+                      |
-|                 Models                  |                      |
-|                                         |                      |
-|  Classical: Linear SVM / Logistic / RF  |                      |
-|  Deep: Tract-Transformer + CORAL/MMD    |                      |
-|  Ensemble: Weighted soft voting         |                      |
-+--------------------+--------------------+                      |
-                     |                                           |
-                     v                                           v
-+-----------------------------------------------------------------------------------+
-|                              Evaluation & Deliverables                            |
-|                                                                                   |
-|  - Out-of-fold Argmax predictions (Accuracy, Balanced Accuracy, Macro F1, AUC)    |
-|  - Post-hoc Calibration: Temperature Scaling & Sigmoid on holdout                 |
-|  - Strict JSON report (allow_nan=False) + Markdown summary                        |
-+-----------------------------------------------------------------------------------+
++----------------------------------------------------------------------------------------------------+
+|                                      数据输入与符号系统 (Data Ingestion)                             |
+|                                                                                                    |
+|   原始纤维束轮廓张量 (Raw Profiles)                        临床元数据与协变量 (Metadata)              |
+|   X ∈ ℝ^(N × 18 × 100 × M)                                y ∈ {1, 2, 3}^N  (1=NC, 2=MCI, 3=AD)     |
+|   [N 受试者, 18 纤维束, 100 节点, M 指标]                    site ∈ {1, ..., S}^N (中心标号)           |
+|                                                           Z ∈ ℝ^(N × 2)    [性别, 年龄]            |
++-------------------------------------------------+--------------------------------------------------+
+                                                  |
+                                                  v
++----------------------------------------------------------------------------------------------------+
+|                               外层交叉验证拓扑分割器 (Outer Splitter)                                |
+|                                                                                                    |
+|     Stratified K-Fold                 Site-Stratified K-Fold               Leave-One-Site-Out      |
+|     (类别分层 K 折)                    (站点均衡轮转 K 折)                   (留一扫描中心外推)        |
++-------------------------------------------------+--------------------------------------------------+
+                                                  |
+                         +------------------------+------------------------+
+                         |                                                 |
+                         v (外层训练折划分: 激活拟合)                          v (外层测试折划分: 锁定冻结)
++--------------------------------------------------+   +---------------------------------------------+
+|              折内无偏转换流水线                  |   |                测试折推理验证               |
+|                                                  |   |                                             |
+|  1. 节点插补: 逐节点中位数 (折内统计量)          |   |  应用训练折冻结的参数:                      |
+|  2. 空间滤波: 1D 高斯/移动平均平滑               |   |  - 禁止重新计算均值与方差                   |
+|  3. 协变量消除: OLS 年龄/性别残差化              |   |  - 继承训练折特征选择掩码                   |
+|  4. 几何投影: Summary 视图或 Profile 视图        |   |  - 继承协变量回归系数矩阵                   |
++------------------------+-------------------------+   +----------------------+----------------------+
+                         |                                                    |
+                         v                                                    |
++--------------------------------------------------+                          |
+|                 模型训练与内层调优               |                          |
+|                                                  |                          |
+|  经典路径: Linear SVM / Logistic / Random Forest |                          |
+|  深度路径: 3D Tract-Transformer + 域适应对齐     |                          |
+|  集成路径: 内层平衡准确率动态加权软投票          |                          |
++------------------------+-------------------------+                          |
+                         |                                                    |
+                         v                                                    v
++----------------------------------------------------------------------------------------------------+
+|                                    评估、校准与交付闭环                                            |
+|                                                                                                    |
+|  - 无偏外层 Out-Of-Fold (OOF) 判别: Accuracy, Balanced Accuracy, Macro-F1, ROC-AUC                 |
+|  - 事后概率校准: 双重留出集拟合温度缩放 (Temperature Scaling) 与多元逻辑回归 (Sigmoid)              |
+|  - 生产模型序列化: .joblib 模型工件 + SHA-256 侧车哈希防篡改验证                                   |
+|  - 规范报告导出: 严格 JSON (allow_nan=False) 与全景 Markdown                                       |
++----------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 1. Quickstart
+## 2. 数据契约与数学规范
 
-### Installation
+### 2.1 基础张量空间定义
 
-Requires Python 3.10+. PyTorch is optional; classical models run on a lightweight stack.
+数据集在内存中由 `dit.data.schema.DatasetBundle` 承载，强制执行显式数学契约：
 
-```bash
-git clone https://github.com/Circumsized/dit-ad-classifier.git
-cd dit-ad-classifier
+| 变量符号 | 维度空间 | 数据类型 | 取值范围 | 物理含义与工程约束 |
+|---|---|---|---|---|
+| $\mathbf{X}$ | $\mathbb{R}^{N \times 18 \times 100 \times M}$ | `float32` | 连续实数或 NaN | 弥散微结构特征张量。$N$ 为样本量，18 条白质束，每条束 100 个重采样节点，$M$ 种弥散物理指标（竞赛全量数据 $M=8$，合成测试集 $M=4$）。 |
+| $\mathbf{y}$ | $\mathbb{Z}^{N}$ | `int64` | $\{1, 2, 3\}$ | 官方临床标签：$1 = \text{NC}$（认知正常），$2 = \text{MCI}$（轻度认知障碍），$3 = \text{AD}$（阿尔茨海默病）。 |
+| $\mathbf{s}$ | $\mathbb{Z}^{N}$ | `int64` | $\{1, \dots, S\}$ | 采集中心标识符。缺失值严格以 $-1$ 编码，任何浮点型或 NaN 均直接拒绝。 |
+| $\mathbf{Z}$ | $\mathbb{R}^{N \times 2}$ | `float32` | 连续实数 | 人口学协变量：第 0 列为性别（$0=\text{女}, 1=\text{男}$），第 1 列为年龄（标称区间 $[40, 95]$）。 |
 
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+在二分类诊断（`--task binary`）下，系统通过视图适配层重新映射标签空间：
 
-# Option A: Core dependencies only (scikit-learn, numpy, scipy)
-pip install -e ".[dev]"
+$$y_{\text{binary}} = \begin{cases} 0, & \text{若 } y = 1 \text{ (NC)} \\ 1, & \text{若 } y = 3 \text{ (AD)} \end{cases}$$
 
-# Option B: Full stack (adds PyTorch CPU/CUDA for Tract-Transformer)
-pip install -e ".[dev,torch]"
+$y = 2$（MCI）样本在此任务中被自动剔除，确保评估目标与临床二分类基准一致。
+
+### 2.2 18 条白质纤维束空间解剖分布
+
+特征通道严格对齐神经解剖学标准纤维束索引：
+
+```
++---------------------------------------------------------------------------------------------+
+|                                  18 条白质纤维束空间解剖映射                                  |
+|                                                                                             |
+|   左半球纤维束 (Left Hemisphere)                 右半球纤维束 (Right Hemisphere)             |
+|   0: 左侧丘脑前辐射 (ATR_L)                      1: 右侧丘脑前辐射 (ATR_R)                   |
+|   2: 左侧皮质脊髓束 (CST_L)                      3: 右侧皮质脊髓束 (CST_R)                   |
+|   4: 扣带回扣带支左侧 (CGC_L)                    5: 扣带回扣带支右侧 (CGC_R)                 |
+|   6: 扣带回海马支左侧 (CGH_L)                    7: 扣带回海马支右侧 (CGH_R)                 |
+|  10: 左侧弓状束 (FMA_L)                         11: 右侧弓状束 (FMA_R)                      |
+|  12: 左侧下额枕束 (IFO_L)                       13: 右侧下额枕束 (IFO_R)                    |
+|  14: 左侧下纵束 (ILF_L)                         15: 右侧下纵束 (ILF_R)                      |
+|  16: 左侧上纵束 (SLF_L)                         17: 右侧上纵束 (SLF_R)                      |
+|                                                                                             |
+|   连合纤维束 (Commissural Fibers)                                                           |
+|   8: 胼胝体主干 / 压部 (CC_ForcepsMajor)          9: 胼胝体额小支 / 膝部 (CC_ForcepsMinor)    |
++---------------------------------------------------------------------------------------------+
 ```
 
-Verify the installation:
-
-```bash
-# Core suite (411 passed, 11 skipped without torch)
-pytest -q
-
-# Full suite (525 passed with torch)
-pytest -q
-```
-
-### Run an Experiment
-
-No real dataset required. Use `--synthetic` to verify the pipeline end-to-end:
-
-```bash
-# 1. Classical Baseline: Linear SVM with Summary features and in-fold residualization
-python -m dit.cli evaluate --synthetic --n-samples 140 \
-    --task binary --strategy stratified \
-    --model linear_svm --view summary \
-    --covariate residualize --out reports/demo_svm
-
-# 2. Deep Pipeline: Tract-Transformer with CORAL domain alignment
-python -m dit.cli evaluate --synthetic --n-samples 140 \
-    --model tract_transformer --alignment coral \
-    --deep-epochs 60 --deep-batch-size 16 --out reports/demo_deep
-
-# 3. Train Production Model & Predict
-python -m dit.cli fit --synthetic --n-samples 140 \
-    --task binary --model linear_svm --artifact artifacts/model.joblib
-
-python -m dit.cli predict --synthetic --n-samples 20 \
-    --artifact artifacts/model.joblib --out predictions.csv
-```
+每个解剖采样点测量以下扩散微结构物理标量：
+- **FA (Fractional Anisotropy)**：各向异性分数，表征水分子的定向扩散程度，与轴突完整性呈正相关。
+- **MD (Mean Diffusivity)**：平均扩散率，反映全向平均水分子运动受限程度。
+- **RD (Radial Diffusivity)**：垂直于主轴突方向的径向扩散率，脱髓鞘病变敏感。
+- **AD (Axial Diffusivity)**：平行于主轴突方向的轴向扩散率，轴突断裂敏感。
 
 ---
 
-## 2. Data Specification
+## 3. 特征投影与数学降维
 
-Input data is managed by `dit.data.schema.DatasetBundle`. Every array follows strict shape contracts:
-
-| Field | Shape | Type | Description |
-|---|---|---|---|
-| `X` | `(N, 18, 100, M)` | `float32` | Diffusion tensor profiles: 18 tracts, 100 equidistant nodes, `M` metrics per node (`M=8` in full AI4AD, `M=4` in synthetic). |
-| `y` | `(N,)` | `int64` | Diagnosis labels: `1 = NC` (Normal Control), `2 = MCI` (Mild Cognitive Impairment), `3 = AD` (Alzheimer's Disease). |
-| `site` | `(N,)` | `int64` | Scanner/Center ID (`1..S`). Missing values encoded as `-1`. Float or NaN values are rejected. |
-| `covariates` | `(N, 2)` | `float32` | Demographic variables: column 0 is `sex` (0=female, 1=male), column 1 is `age` (range 40–95). |
-
-### Anatomy: 18 White Matter Tracts
-
-Features map to 18 bilateral and commissural tracts:
+原始全特征维度达到 $18 \times 100 \times M$（当 $M=8$ 时为 $14,400$ 维）。面对 $N \approx 700$ 的样本量，特征样本比高达 $p/n \approx 20.6$。系统提供两套解剖学特征投影方案：
 
 ```
-Index  Tract Name                     Abbr.      Index  Tract Name                     Abbr.
---------------------------------------------------------------------------------------------
- 0     Anterior Thalamic Radiation L  ATR_L       1     Anterior Thalamic Radiation R  ATR_R
- 2     Corticospinal Tract L          CST_L       3     Corticospinal Tract R          CST_R
- 4     Cingulum Cingulate L           CGC_L       5     Cingulum Cingulate R           CGC_R
- 6     Cingulum Hippocampus L         CGH_L       7     Cingulum Hippocampus R         CGH_R
- 8     Corpus Callosum Major          CC_Major    9     Corpus Callosum Minor          CC_Minor
-10     Arcuate Fasciculus L           FMA_L      11     Arcuate Fasciculus R           FMA_R
-12     Inferior Fronto-Occipital L    IFO_L      13     Inferior Fronto-Occipital R    IFO_R
-14     Inferior Longitudinal L        ILF_L      15     Inferior Longitudinal R        ILF_R
-16     Superior Longitudinal L        SLF_L      17     Superior Longitudinal R        SLF_R
+原始高维张量 X ∈ ℝ^(N × 18 × 100 × M)
+              │
+      +-------+---------------------------------------+
+      |                                               |
+      v                                               v
+[ Summary 视图投影 ]                           [ Profile 视图投影 ]
+对每条纤维束每个指标计算 4 个几何统计标量:       直接展平所有解剖采样节点:
+  - 均值 (Mean)                                  x = [x_1, x_2, ..., x_100]
+  - 标准差 (Standard Deviation)
+  - 线性剖面斜率 (Profile Slope)                 可选 1D 空间平滑卷积:
+  - 梯形积分面积 (Trapz Area)                      x'_k = (1/W) Σ_{j=-w}^w x_{k+j}
+      │                                               │
+      v                                               v
+特征向量维度: 18 × M × 4                        特征向量维度: 18 × 100 × M
+(当 M=8 时压缩至 576 维)                       (当 M=8 时保持 14,400 维)
 ```
 
-Metrics per node include Fractional Anisotropy (FA), Mean Diffusivity (MD), Radial Diffusivity (RD), and Axial Diffusivity (AD).
+### 3.1 缺失抗污染梯形积分方程
 
----
+传统数值积分在遇到单点追踪失败（NaN）时会导致整列失效。系统在有效采样节点子集 $I = \{k \mid x_k \neq \text{NaN}\}$ 上执行带自适应步长梯形积分：
 
-## 3. Representations: Summary vs Profile
+$$S(x) = \sum_{i=1}^{|I|-1} \frac{x_{I[i+1]} + x_{I[i]}}{2} \cdot (I[i+1] - I[i])$$
 
-Raw profiles contain $18 \times 100 \times M$ measurements ($14,400$ dimensions when $M=8$) for $N \approx 700$ subjects. This is an extreme $p \gg n$ regime ($p/n \approx 20.6$).
+若该纤维束有效节点过少（$|I| < 2$），则积分结果设为 $0$，由下游折内中位数插补器在训练折内填充。
 
-```
-Raw Tract Tensor: (18 tracts, 100 nodes, M metrics)
-                       |
-         +-------------+-------------+
-         |                           |
-         v                           v
-  [ Summary View ]            [ Profile View ]
-  Per tract, per metric:      Concatenate all 100 raw nodes:
-  - Mean:       mu            [x_1, x_2, ..., x_100]
-  - Std:        sigma
-  - Slope:      beta          Optional 1D Gaussian smoothing
-  - Area:       trapz(x)
-         |                           |
-         v                           v
-  Dim = 18 * M * 4            Dim = 18 * 100 * M
-  (576 dims when M=8)         (14,400 dims when M=8)
-```
+### 3.2 折内普通最小二乘协变量残差化 (Covariate Residualization)
 
-### NaN-Safe Trapezoidal Integration
+为了消除受试者生理年龄与性别对扩散微结构的混杂效应，系统在训练折内拟合线性回归并计算纯白质几何残差：
 
-Standard integration fails if any node is NaN, corrupting the entire feature column. Our trapezoidal integration handles missing nodes over the valid index set $I = \{k \mid x_k \neq \text{NaN}\}$:
+$$X_{\text{train}} = Z_{\text{train}} W + E_{\text{train}}$$
 
-$$S = \sum_{i=1}^{|I|-1} \frac{x_{I[i+1]} + x_{I[i]}}{2} \cdot (I[i+1] - I[i])$$
+$$W = \left( Z_{\text{train}}^T Z_{\text{train}} \right)^{-1} Z_{\text{train}}^T X_{\text{train}}$$
 
-If $|I| < 2$, the integral returns 0, and downstream in-fold median imputation fills the missing value.
-
-### Covariate Residualization
-
-When `--covariate residualize` is enabled, age and sex effects are removed via Ordinary Least Squares (OLS) fitted **only on the training fold**:
-
-$$W = (Z_{\text{train}}^T Z_{\text{train}})^{-1} Z_{\text{train}}^T X_{\text{train}}, \quad \text{where } Z = [\mathbf{1}, \text{age}, \text{sex}]$$
 $$\tilde{X}_{\text{train}} = X_{\text{train}} - Z_{\text{train}} W$$
+
 $$\tilde{X}_{\text{test}} = X_{\text{test}} - Z_{\text{test}} W$$
 
-The test fold is projected using the training coefficients $W$. No test-set statistics leak into $W$.
+其中协变量设计矩阵为：
+
+$$Z = [\mathbf{1}, \text{age}, \text{sex}] \in \mathbb{R}^{N \times 3}$$
+
+回归系数矩阵 $W \in \mathbb{R}^{3 \times P}$ 完全在训练折上解析求得，测试折特征直接减去预测趋势值 $Z_{\text{test}} W$。
 
 ---
 
-## 4. Leakage Prevention Contract
+## 4. 数据隔离与防泄漏契约
 
-In neuroimaging ML, data leakage through pre-split normalization or feature selection is common. This pipeline enforces strict isolation:
+系统在时序和空间上切断测试集信息向前传递的可能：
 
 ```
-Full Dataset (N subjects)
-       |
-       v
-[ Outer Fold Splitter ] --------------------------+
-       |                                          |
-       v (Training fold only)                     v (Held-out fold locked)
-[ Fit Mean & Variance ]                           [ Frozen ]
-[ Fit Feature Selector (ANOVA F-score) ]          |
-[ Fit Covariate Regression W ]                    |
-       |                                          |
-       +--------------------+                     |
-       v                    | Apply fitted params |
-[ Transform X_train ]       +-------------------->| Transform X_test ]
-       |                                          | (Do not recompute mu, sigma, W)
-       v                                          |
-[ Inner CV: Grid Search ]                         |
-       |                                          |
-       v Best hyperparams theta*                  |
-[ Fit Final Model on X_train ]                    |
-       |                                          |
-       v Predict                                  v
-       +----------------------------------------->[ OOF Predictions P_test ]
++-----------------------------------------------------------------------------------+
+|                        全数据集 (N 个样本)                                         |
++-----------------------------------------+-----------------------------------------+
+                                          |
+                                          v  外层分割器 (Outer Split)
+                 +------------------------+------------------------+
+                 |                                                 |
+                 v 仅外层训练集 (N_train)                           v 仅外层测试集 (N_test)
++-----------------------------------------+        +--------------------------------+
+| 计算训练集统计量:                       |        | 状态: 完全冻结锁定             |
+|  - 中位数向量: med(X_train)             |        |                                |
+|  - 均值与方差: μ_train, σ_train         |        | 待命等待前向推理               |
+|  - ANOVA F 检验选择 Top-K 特征          |        |                                |
+|  - 求解 OLS 残差化系数 W                |        |                                |
++--------------------+--------------------+        +----------------+---------------+
+                     |                                              |
+                     | 将拟合参数直接传递给测试集                   |
+                     +--------------------------------------------->| 执行矩阵转换:
+                     |                                              |  X_test = (X_test - μ) / σ
+                     v                                              |  保留训练折选择的 K 列
++-----------------------------------------+                         |
+| 内层超参网格搜索 (K_inner)              |                         |
+|  - 在训练集内部再切分搜索最佳参数 θ*    |                         |
+|  - 重新使用完整 N_train 拟合最终模型    |                         |
++--------------------+--------------------+                         |
+                     |                                              |
+                     | 导出拟合模型 M(·; θ*)                        |
+                     +--------------------------------------------->| 输出 OOF 预测
+                                                                    | P_test = M(X_test)
 ```
 
-| Pipeline Step | Fitted On | Applied To | Common Bug Prevented |
+| 流水线操作 | 拟合输入数据 (Fit Domain) | 应用转换数据 (Transform Domain) | 常见泄漏反模式 (本系统严格禁止) |
 |---|---|---|---|
-| Imputation | $X_{\text{train}}$ | $X_{\text{train}}, X_{\text{test}}$ | Fitting imputer on all $N$ subjects before split. |
-| Standardization | $X_{\text{train}}$ | $X_{\text{train}}, X_{\text{test}}$ | Computing global $\mu, \sigma$ across train + test. |
-| Residualization | $[X, Z]_{\text{train}}$ | $[X, Z]_{\text{test}}$ | Regressing age/sex out of all subjects before split. |
-| Feature Selection | $X_{\text{train}}$ inner folds | Inner validation | Selecting top-K features using all labels. |
-| Hyperparameter Tuning | $X_{\text{train}}$ inner folds | Inner validation | Selecting $C$ based on outer test performance. |
-| Probability Calibration | Calibration holdout | $X_{\text{test}}$ | Calibrating temperature on the outer test set. |
+| **缺失值中位数插补** | 仅外层训练折 $X_{\text{train}}$ | 训练折与测试折分别应用 | 在外层交叉验证切分前，对全数据集 $N$ 样本统一计算中位数。 |
+| **标准正态标准化** | 仅外层训练折 $X_{\text{train}}$ | 转换测试折 $X_{\text{test}}$ | 使用全样本均值 $\mu_{\text{all}}$ 与标准差 $\sigma_{\text{all}}$ 执行归一化。 |
+| **协变量残差化** | 训练折 $[X, Z]_{\text{train}}$ | 独立回归系数作用于测试折 | 在全数据集上统一执行 OLS 回归后，将残差矩阵输入交叉验证。 |
+| **方差/单变量特征选择**| 内层训练切片 | 对应内层验证切片 | 基于全量受试者计算特征与疾病标签的相关系数并筛选特征。 |
+| **超参数网格寻优** | 内层训练切片 | 内层验证切片 | 依据外层测试折的评价指标反向筛选最佳正则化惩罚项 $C$。 |
+| **后验概率校准** | 训练折内部预留校准集 | 外层测试折 | 在外层测试折上拟合温度标量 $T$ 或 Platt 逻辑回归系数。 |
 
 ---
 
-## 5. Cross-Validation Strategies
+## 5. 交叉验证分割协议
 
-Three cross-validation schemes address different evaluation questions:
+系统实现三套正交分割器，分别评估不同维度的泛化目标：
 
 ```
-1. Stratified K-Fold (--strategy stratified)
-   Subject space: [ Fold 1 ][ Fold 2 ][ Fold 3 ][ Fold 4 ][ Fold 5 ]
-   -> Equal class ratio (NC : AD) across all folds. Tests within-distribution generalization.
-
-2. Site-Stratified K-Fold (--strategy site_stratified)
-   Site A:        [   1   ][   2   ][   3   ][   4   ][   5   ]
-   Site B:        [   1   ][   2   ][   3   ][   4   ][   5   ]
-   Site C:        [   1   ][   2   ][   3   ][   4   ][   5   ]
-   -> Each site evenly allocated across all folds. Equal site distribution in every fold.
-
-3. Leave-One-Site-Out (--strategy loso)
-   Site 1 -----------------------------------------> Fold 1 Test (Sites 2..7 Train)
-   Site 2 -----------------------------------------> Fold 2 Test (Sites 1, 3..7 Train)
-   ...
-   Site 7 -----------------------------------------> Fold 7 Test (Sites 1..6 Train)
-   -> Zero-shot transfer to unseen scanner hardware and imaging protocols.
++-----------------------------------------------------------------------------------+
+| 方案 1: 分层 K 折 (--strategy stratified)                                         |
+|                                                                                   |
+| 受试者空间: ┌──────────┬──────────┬──────────┬──────────┬──────────┐              |
+|            │  折 1    │  折 2    │  折 3    │  折 4    │  折 5    │              |
+|            └──────────┴──────────┴──────────┴──────────┴──────────┘              |
+| 特点: 各折保持完全一致的类别比例 (NC : AD)，用于测量同分布内受试者泛化能力。      |
++-----------------------------------------------------------------------------------+
+| 方案 2: 站点分层 K 折 (--strategy site_stratified)                                |
+|                                                                                   |
+| 中心 A:    ┌────┬────┬────┬────┬────┐                                             |
+| 中心 B:    ├────┼────┼────┼────┼────┤  <- 各中心内部独立乱序打乱，余数发牌轮转均摊   |
+| 中心 C:    └────┴────┴────┴────┴────┘                                             |
+| 测试折代表: [F1] [F2] [F3] [F4] [F5]                                              |
+| 特点: 各折测试集拥有完全相同的中心构成，消除中心采样波动造成的评估方差。          |
++-----------------------------------------------------------------------------------+
+| 方案 3: 留一中心外推 (--strategy loso)                                            |
+|                                                                                   |
+| 扫描中心 1 ───────────────────────────────► 折 1 测试集 (其余 2..7 中心作为训练集)|
+| 扫描中心 2 ───────────────────────────────► 折 2 测试集 (其余 1, 3..7 作为训练集) |
+| ...                                                                               |
+| 扫描中心 7 ───────────────────────────────► 折 7 测试集 (其余 1..6 作为训练集)    |
+| 特点: 测量零样本跨中心硬件与序列域迁移泛化下界。                                   |
++-----------------------------------------------------------------------------------+
 ```
 
-### Statistical Comparison Rules
+### 5.1 统计学配对检验有效性定理
 
-- **Wilcoxon Signed-Rank Test**: Only valid between two models evaluated on the **exact same task, strategy, and fold splits** (verified via SHA-256 test index digests).
-- Stratified and LOSO results **must never be paired**.
-- For 5-fold CV ($n=5$), the minimum attainable two-sided $p$-value is $2^{-4} = 0.0625$. Any claim of $p < 0.05$ on 5-fold CV is mathematically invalid.
+对于两个模型方案的性能差异显著性检验，系统在 `dit.evaluation.site_balance` 中强制执行以下约束：
+1. **配对成立充要条件**：两组运行必须具备完全相同的任务类型（`task`）、分割策略（`strategy`）以及**逐折相等的测试集索引散列摘要（SHA-256 Digest）**。
+2. **禁止跨策略配对**：严禁将 `stratified` 方案的分数与 `loso` 方案的分数进行逐折配对检验。
+3. **5 折统计功效下界**：对于 5 折交叉验证（$n=5$），双侧 Wilcoxon 符号秩检验在所有差值全为同号时，最小理论可达显著性水平为：
+
+$$p_{\min} = 2^{-(n-1)} = 2^{-4} = 0.0625$$
+
+任何在 5 折交叉验证上宣称检验结果 $p < 0.05$ 的分析在数学上均无法成立。报告自动携带此功效约束提示。
 
 ---
 
-## 6. Models & Domain Adaptation
+## 6. 模型架构与域适应机制
 
-### Classical Baseline Grid
+### 6.1 经典分类器参数空间
 
-Pipelines are built using `dit.models.classical.make_search_estimator`:
+所有经典模型均封装在带特征选择与标准化的折内流水线中，通过 `dit.models.classical.make_search_estimator` 构建：
 
-| Model Flag | Estimator | Hyperparameter Search Grid | Output |
+| 模型标识 (`--model`) | 算法实现 | 调优搜索空间 | 决策函数输出说明 |
 |---|---|---|---|
-| `linear_svm` | `SVC(kernel='linear')` | $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100, 1000\}$ | Decision function calibrated via Platt scaling. |
-| `logistic` | `LogisticRegression` | $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100\}$, Penalty $\in \{\text{l1}, \text{l2}\}$ | Regularized log-odds probabilities. |
-| `random_forest` | `RandomForestClassifier` | `n_estimators`: 200, `max_depth`: $\{4, 8, \text{None}\}$ | Ensemble tree vote fractions. |
-| `hist_gradient_boosting`| `HistGradientBoostingClassifier`| `learning_rate`: $\{0.01, 0.05, 0.1\}$, `max_iter`: 150 | Boosted gradient tree ensembles. |
-| `ensemble` | Soft voting ensemble | Dynamic in-fold weighting from inner CV balanced accuracy | Weighted posterior probability sum. |
+| `linear_svm` | `sklearn.svm.SVC(kernel='linear')` | $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100, 1000\}$ | 决策超平面有符号距离经 Platt 逻辑回归映射为后验概率。 |
+| `logistic` | `sklearn.linear_model.LogisticRegression` | $C \in \{10^{-3}, 10^{-2}, 10^{-1}, 1, 10, 100\}$, Penalty $\in \{\text{l1}, \text{l2}\}$ | 弹性网正则化对数几率模型。 |
+| `random_forest` | `sklearn.ensemble.RandomForestClassifier` | `n_estimators`: 200, `max_depth`: $\{4, 8, \text{None}\}$ | 决策树集成叶节点经验分布加权投票。 |
+| `hist_gradient_boosting`| `sklearn.ensemble.HistGradientBoostingClassifier`| `learning_rate`: $\{0.01, 0.05, 0.1\}$, `max_iter`: 150 | 直方图分箱梯度提升决策树。 |
+| `ensemble` | 动态加权软投票集成 | 权重 $w_m$ 由内层折平衡准确率归一化计算 | 多模型后验概率矩阵加权和。 |
 
-### Tract-Transformer
+### 6.2 3D 几何纤维束 Transformer (Tract-Transformer)
 
-`TractTransformer` operates directly on $(B, 18, 100 \times M)$ tensors, preserving anatomical tract structure:
+网络直接以三维特征张量输入，将 18 条解剖纤维束作为 18 个独立的解剖学 Token：
 
 ```
-Input: X in R^(B, 18 tracts, D_in)  (18 tracts treated as 18 tokens)
-               |
-               v
-  [ Tract Linear Projection (D_in -> D_model) + Anatomical Positional Embeddings ]
-               |
-               v
-  [ Transformer Encoder Layers x L ]
-   - Multi-Head Self-Attention across anatomical tracts
-   - Missing tract attention masking (inf mask on missing tracts)
-   - LayerNorm & FeedForward with GELU
-               |
-               v
-  [ Masked Mean Pooling over valid tracts -> h_pool in R^(B, D_model) ]
-               |
-       +-------+---------------------------------------+
-       |                                               |
-       v                                               v
-[ Classification Head ]                     [ Domain Adaptation Head ]
-Linear(D_model -> 1024)                     CORAL: Covariance matrix distance
-ReLU() + Dropout(0.1)                       MMD:   Multi-kernel RBF distance
-Linear(1024 -> N_classes)                   DANN:  Gradient Reversal Layer (GRL)
-       |                                               |
-       v                                               v
- Classification Loss L_CE                     Alignment Loss L_align
-       |                                               |
-       +-----------------------+-----------------------+
-                               |
-                               v
-                     Total Loss: L = L_CE + gamma(t) * L_align
+输入序列张量: X ∈ ℝ^(B × 18 × D_in)  (D_in = 100 × M)
+有效性掩码:   M ∈ {0, 1}^(B × 18)
+                    │
+                    v
+[ 线性投影 Linear(D_in → D_model) + 可学习解剖位置编码 E_pos ∈ ℝ^(18 × D_model) ]
+                    │
+                    v
++-------------------------------------------------------------+
+| 多层 Transformer 编码器 (L 层自注意力机制与残差网络)        |
+|                                                             |
+|   A = Softmax( (Q K^T) / √D_k + M_attn )                    | <- M_attn: 缺失纤维束 -∞ 屏蔽
+|   Z = MultiHeadAttention(Q, K, V) + Z_in                    |
+|   Z = LayerNorm(MLP(Z) + Z)                                 |
++-------------------------------------------------------------+
+                    │
+                    v
+[ 有效束掩码均值池化: h_pool = (Σ_i Z[:, i, :] · m_i) / (Σ_i m_i + ε) ]
+                    │
+        +-----------+-----------------------------------------+
+        |                                                     |
+        v                                                     v
+[ 疾病诊断分类头 ]                                  [ 扫描中心对齐头 ]
+ Linear(D_model → 1024)                              ├── CORAL 协方差距离
+ ReLU() + Dropout(0.1)                               ├── MMD 再生核高斯均值距离
+ Linear(1024 → N_classes)                            └── DANN 梯度反转判别器
+        │                                                     │
+        v                                                     v
+  诊断损失 L_CE (加权交叉熵)                           对齐损失 L_align
+        │                                                     │
+        +--------------------------+--------------------------+
+                                   |
+                                   v
+                      联合优化目标: L = L_CE + γ(t) · L_align
 ```
 
-Alignment strength ramps up linearly: $\gamma(t) = \min(1.0, \frac{t+1}{T_{\text{ramp}}}) \cdot \lambda$. Classification gradients are accumulated across mini-batches so that domain alignment statistics are computed over stable epoch-wide representations.
+对齐调度强度随 Epoch 推进线性增加：
 
-### Probability Calibration
+$$\gamma(t) = \min\left(1.0, \frac{t + 1}{T_{\text{ramp}}}\right) \cdot \lambda_{\text{align}}$$
 
-Weighted cross-entropy shifts predicted posteriors away from true prevalence. Two post-hoc calibration methods are available on held-out folds:
-- **Temperature Scaling (`temperature`)**: Optimizes a scalar $T > 0$ to scale logits: $P(y=k \mid z) = \text{softmax}(z / T)$. Preserves Argmax predictions exactly.
-- **Sigmoid Calibration (`sigmoid`)**: Fits class-wise logistic curves followed by simplex normalization. Can adjust decision boundaries.
+三种对齐损失的数学公式定义如下：
+
+#### A. CORAL 协方差对齐损失
+度量源中心 $S$ 与目标中心 $T$ 特征协方差矩阵的 Frobenius 范数距离：
+
+$$\mathcal{L}_{\text{CORAL}} = \frac{1}{4 d^2} \| C_S - C_T \|_F^2$$
+
+其中 $C = \frac{1}{n - 1} \left( H^T H - \frac{1}{n} (\mathbf{1}^T H)^T (\mathbf{1}^T H) \right)$。
+
+#### B. MMD 最大均值差异损失
+使用多尺度高斯核混合族 $k(x, x') = \sum_q \exp\left(-\frac{\|x - x'\|^2}{2\sigma_q^2}\right)$ 映射特征，计算再生核希尔伯特空间（RKHS）均值距离：
+
+$$\mathcal{L}_{\text{MMD}} = \frac{1}{n_S^2} \sum_{i,j} k(h_i^S, h_j^S) - \frac{2}{n_S n_T} \sum_{i,j} k(h_i^S, h_j^T) + \frac{1}{n_T^2} \sum_{i,j} k(h_i^T, h_j^T)$$
+
+#### C. DANN 域对抗对抗训练
+在特征提取器与中心判别器之间构建梯度反转层（GRL）。
+前向传播为恒等变换：
+
+$$R(h) = h$$
+
+反向传播时将误差梯度反向放大：
+
+$$\frac{\partial R}{\partial h} = -\gamma(t) \mathbf{I}$$
+
+### 6.3 事后概率校准系统
+
+类别加权交叉熵在不平衡数据上会造成置信度高估。系统支持在外层折预留的校准集上进行后处理校正：
+
+#### A. 温度标量缩放 (Temperature Scaling)
+通过最小化负对数似然损失求解单标量 $T > 0$：
+
+$$P(y = k \mid z) = \frac{\exp(z_k / T)}{\sum_{j=1}^K \exp(z_j / T)}$$
+
+由于温度缩放是单调变换，分类决策边界严格保持不变，仅调整概率分布的平滑度。
+
+#### B. 多元 Sigmoid 向量校准 (Multivariate Sigmoid)
+针对每个类别 $k$ 独立拟合 Platt 逻辑回归模型并执行 Simplex 投影归一化：
+
+$$q_k = \frac{1}{1 + \exp(-(A_k \cdot p_k + B_k))}$$
+
+$$P_{\text{calibrated}}(y = k) = \frac{q_k}{\sum_{j=1}^K q_j}$$
+
+此模式允许轻微修正分类超平面，但要求校准切片中每个类别均包含至少 2 个正样本与 2 个负样本。
 
 ---
 
-## 7. CLI Reference
+## 7. 命令行工程接口
 
-All commands run through `python -m dit.cli`:
+CLI 统一入口为 `python -m dit.cli`：
 
 ```
-dit.cli Commands:
-├── evaluate   Run cross-validation experiment (stratified, loso, site_stratified)
-├── fit        Train production model on all labeled data and export artifact + SHA-256
-├── predict    Run inference using exported artifact with checksum verification
-├── ablation   Sweep covariate strategies (none, feature, residualize) and views
-├── matrix     Run full 2-task x 2-strategy benchmark matrix
-├── interpret  Compute tract-node importance heatmaps aligned to literature
-├── fetch      Download dataset over HTTPS with SSRF protection and socket pinning
-└── info       Print environment details, package versions, and platform fingerprint
+dit.cli 命令行工具箱:
+├── evaluate   执行指定特征视图与模型体系的交叉验证评测 (支持三种划分策略)
+├── fit        在全量数据上执行完整折内搜索，导出生产模型工件与 SHA-256 侧车
+├── predict    载入工件执行未标记队列推理，强制校验 SHA-256 签名与特征列契约
+├── ablation   执行协变量策略 (none / feature / residualize) 与特征视图全景消融
+├── matrix     自动化批处理执行 2 任务 (binary/multiclass) × 2 策略基准矩阵
+├── interpret  全量重拟合模型，导出神经解剖节点贡献度热力图与文献比对
+├── fetch      具备安全白名单、防 SSRF 重定向校验与 Socket 钉扎的数据下载器
+└── info       打印当前硬件指纹、Python 运行时、包版本与平台信息
 ```
 
-### Examples
+### 7.1 执行示例
 
+#### 1. 经典流水线交叉验证评测
 ```bash
-# Cross-validation with custom parameters
 python -m dit.cli evaluate --mat MCAD_AFQ_competition.mat \
     --task binary --strategy loso \
     --model linear_svm --view summary \
     --covariate residualize --threshold f1 \
-    --out reports/loso_svm
+    --out reports/loso_linear_svm
+```
 
-# Covariate ablation sweep
-python -m dit.cli ablation --mat MCAD_AFQ_competition.mat \
-    --task binary --model linear_svm --out reports/ablation
+#### 2. 域适应 Transformer 训练与校准
+```bash
+python -m dit.cli evaluate --synthetic --n-samples 140 \
+    --model tract_transformer --alignment coral \
+    --deep-calibration temperature \
+    --deep-epochs 120 --deep-batch-size 16 \
+    --out reports/deep_coral
+```
 
-# Feature importance analysis
-python -m dit.cli interpret --mat MCAD_AFQ_competition.mat \
-    --view profile --out reports/interpretability
+#### 3. 生产模型导出与盲测推理交付
+```bash
+# 步骤 1: 全量拟合并生成防篡改校验和文件
+python -m dit.cli fit --mat MCAD_AFQ_competition.mat \
+    --task binary --model linear_svm \
+    --artifact artifacts/model.joblib
+
+# 步骤 2: 校验 SHA-256 签名并生成盲测预测输出
+python -m dit.cli predict --mat MCAD_AFQ_test.mat \
+    --artifact artifacts/model.joblib \
+    --out predictions.csv
 ```
 
 ---
 
-## 8. Repository Layout
+## 8. 软件仓库物理拓扑
 
 ```
 DIT-/
-├── configs/                     YAML experiment configurations
-│   └── baseline_linear_svm.yaml Default linear SVM setup
-├── dit/                         Core package
-│   ├── cli/main.py              Command-line interface
+├── configs/                     声明式 YAML 实验配置集
+│   └── baseline_linear_svm.yaml 线性 SVM 默认实验超参基准
+├── dit/                         生产级可复现核心业务逻辑包
+│   ├── cli/main.py              CLI 入口：参数解析、校验与分发
 │   ├── data/
-│   │   ├── covariates.py        In-fold OLS covariate residualization
-│   │   ├── layout.py            Tract and node index management
-│   │   ├── mat_loader.py        MATLAB v5/v7.3 parser with schema checks
-│   │   ├── preprocessing.py     In-fold median imputation and spatial smoothing
-│   │   ├── schema.py            DatasetBundle contracts and validation
-│   │   ├── selection.py         In-fold ANOVA feature selection
-│   │   ├── splits.py            Stratified, site-stratified, and LOSO splitters
-│   │   └── synthetic.py         Deterministic synthetic data generator
+│   │   ├── covariates.py        协变量处理与折内 OLS 残差化实现
+│   │   ├── layout.py            纤维束空间拓扑映射与维度管理
+│   │   ├── mat_loader.py        MATLAB 矩阵解析与标量校验
+│   │   ├── preprocessing.py     折内中位数插补与空间高斯平滑滤波
+│   │   ├── schema.py            核心张量契约 DatasetBundle 约束定义
+│   │   ├── selection.py         嵌套 ANOVA 解剖块级与节点级特征筛选
+│   │   ├── splits.py            分层 K 折、站点分层与 LOSO 确定性分割
+│   │   └── synthetic.py         确定性伪随机合成医学影像数据引擎
 │   ├── evaluation/
-│   │   ├── experiment.py        Cross-validation experiment runners
-│   │   ├── metrics.py           Accuracy, Balanced Accuracy, AUC, ECE, Brier
-│   │   ├── provenance.py        Manifest hashes and zero-PHI verification
-│   │   ├── reporting.py         Structured JSON and Markdown report generation
-│   │   ├── site_balance.py      Multicenter balance analysis and Wilcoxon tests
-│   │   └── threshold.py         Decision threshold tuning on OOF probabilities
+│   │   ├── experiment.py        外层交叉验证主循环执行器
+│   │   ├── metrics.py           准确率、平衡准确率、AUC、ECE 统计指标计算
+│   │   ├── provenance.py        Manifest 散列记录与零 PHI 泄漏验证
+│   │   ├── reporting.py         严格 JSON 与全景 Markdown 报告生成器
+│   │   ├── site_balance.py      多中心构成分析与条件约束 Wilcoxon 配对检验
+│   │   └── threshold.py         基于 OOF 分布的后处理决策阈值寻优器
 │   ├── models/
-│   │   ├── calibration.py       Temperature scaling and sigmoid calibration
-│   │   ├── classical.py         Scikit-learn estimators and grid search
-│   │   ├── domain_adaptation.py CORAL, MMD, and DANN implementations
-│   │   ├── domain_train.py      PyTorch training loop with early stopping
-│   │   └── tract_transformer.py 3D Tract-Transformer architecture
-│   ├── deployment.py            Model serialization, SHA-256 sidecars, inference
-│   └── interpret/               Anatomical feature attribution heatmaps
-├── docs/                        Specifications and audit records
-│   ├── FROZEN_EXPERIMENT_SPEC.md W0 frozen benchmark protocol
-│   ├── USAGE.md                 Deep learning architecture and calibration details
-│   ├── OPTIMIZATION_PLAN.md     Historical audit and rewrite roadmap
-│   └── LICENSE_TODO.md          IP and provenance records
-├── legacy/                      Unmaintained 2020 course scripts (for reference only)
-│   ├── _DO_NOT_RUN.md           Bug catalog of original submission scripts
-│   └── afq2020_reference/       Archived 2020 upstream source code
-└── tests/                       Test suite (525 tests)
+│   │   ├── calibration.py       事后概率校准模块 (温度缩放与 Platt 映射)
+│   │   ├── classical.py         5 大 Scikit-Learn 估计器与折内网格搜索
+│   │   ├── domain_adaptation.py CORAL、MMD 损失与 DANN 梯度反转层
+│   │   ├── domain_train.py      PyTorch 训练循环、早停与内层验证器
+│   │   └── tract_transformer.py 3D 几何结构保留的白质纤维束注意力网络
+│   ├── deployment.py            模型工件序列化、SHA-256 签名与反序列化引擎
+│   └── interpret/               解剖贡献权重映射、热力图绘制与文献区间对齐
+├── docs/                        系统工程与审计规范
+│   ├── FROZEN_EXPERIMENT_SPEC.md W0 冻结基准测试协议
+│   ├── USAGE.md                 深度模型与高级评估机制技术详解
+│   ├── OPTIMIZATION_PLAN.md     系统历史重写与缺陷根因审计报告
+│   └── LICENSE_TODO.md          知识产权归属与资产合规备忘录
+├── legacy/                      历史遗留归档 (禁止执行，作为审计基准保留)
+│   ├── _DO_NOT_RUN.md           历史缺陷分析与执行禁止警示清单
+│   └── afq2020_reference/       2020 竞赛初始代码存档及站点划分清单
+├── tests/                       自动化回归测试套件 (525 个测试用例)
+├── LICENSE                      MIT 开源软件许可证文本
+└── pyproject.toml               打包与依赖声明文件
 ```
 
 ---
 
-## 9. License & Citations
+## 9. 环境配置与持续集成验证
 
-Code released under the [MIT License](LICENSE). Copyright (c) 2026 Circumsized.
+### 9.1 安装指南
 
-The AI4AD dataset is distributed separately by its organizers. This repository does not contain or distribute proprietary patient neuroimaging data.
+```bash
+# 创建并激活专用虚拟环境 (要求 Python 3.10+)
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate      # Linux / macOS
 
-If you use this codebase, please cite:
+# 基础模式 1: 仅安装核心依赖 (轻量化，无 PyTorch，支持全部经典流水线)
+pip install -e ".[dev]"
+
+# 基础模式 2: 安装完整套件 (包含 PyTorch CPU/CUDA，支持深度学习与域对齐)
+pip install -e ".[dev,torch]"
+```
+
+### 9.2 自动化测试套件执行
+
+套件内置确定性合成生理数据，**不依赖外部网络或私有数据**即可执行全部测试验证：
+
+```bash
+# 完整套件验证 (在包含 PyTorch 的环境中验证全部 525 个测试)
+pytest -q
+# 输出: 525 passed (2026-10-09, torch 2.6.0+cpu)
+
+# 仅核心套件验证 (无 PyTorch 环境，深度测试安全跳过)
+pytest -q
+# 输出: 411 passed, 11 skipped (2026-10-09)
+```
+
+GitHub Actions 持续集成系统在以下环境中自动执行对等验证：
+1. **Ubuntu Linux / Python 3.10**: 验证核心流水线（411 项测试通过，11 项深度测试安全跳过）。
+2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（525 项测试全量通过）。
+
+---
+
+## 10. 软件许可与引用
+
+代码依据 [MIT 许可证](LICENSE) 发布。版权所有 (c) 2026 Circumsized。
+原始 AI4AD 竞赛数据及 `.mat` 矩阵文件由其组织方根据其各自的数据访问协议独立分发，本代码仓库不包含、不分发任何受保护的受试者神经影像数据。
+
+引用格式：
 
 ```bibtex
 @article{qu2021ai4ad,
