@@ -1,61 +1,88 @@
-# 遗留脚本缺陷根因审计与禁止执行清单 (LEGACY DEFECT ARCHIVE)
+# 2020 Legacy Defect Archive & Audit
 
-**状态：废弃归档 (DEPRECATED & ARCHIVED)**  
-**安全约束：禁止执行 (DO NOT EXECUTE)**
+**Status: DEPRECATED & ARCHIVED**  
+**Execution Status: DO NOT RUN**
 
-本目录收录 2020 年课程原始提交脚本。这些脚本存在数学逻辑破坏、梯度计算失效与内存泄漏等结构性缺陷。本文件基于第一性原理，逐行解剖其底层破坏机制，作为系统重构的反面设计对照。
-
----
-
-## 1. 缺陷架构全景矩阵
-
-```
-遗留流水线关键故障点分布图:
-
-原始数据输入 (.mat)
-       │
-       ▼ [F8: 解剖束维度硬编码为 20，官方实际仅 18 条白质纤维束]
-特征张量展开
-       │
-       ▼ [F7: 任何单点 NaN 导致整条白质束非零真实测量值被全部抹零]
-数据归一化
-       │
-       ▼ [F1: 标签解析使用 label.index(max(label))，所有样本标签恒为 0]
-模型输入构建
-       │
-       ├─────────────────────────────────┬─────────────────────────────────┐
-       ▼ (ML.py 传统路径)                ▼ (transformer.py 深度路径)       ▼ (test.py 推理路径)
-`fit()` 因单类别崩溃               [F2: norm="T" 触发 TypeError]     [F6: 异常加权规则
-                                  [F3: 缺少 data_loader.py 依赖]         向类 1 累加最大概率
-                                  [F4: Softmax 嵌套 BCELoss 梯度破坏]    向类 2 累加最小概率]
-```
-
-### 1.1 缺陷根因与破坏机理详表
-
-| 编号 | 缺陷源码位置 | 表面现象 | 机制级根因剖析 (First Principles Root Cause) | 对系统产生的影响 |
-|---|---|---|---|---|
-| **F1** | `ML.py:25-26` | 模型拟合直接抛错退出 | `max_index = label.index(max(label))`。输入为标量数值向量而非 One-Hot 编码。对于形如 `[1]` 或 `[3]` 的单元素列表，最大值的列表索引恒为 `0`。 | 全数据集样本标签被坍缩为单一类别 `0`；`sklearn.fit()` 因训练集仅含单个类别直接抛出异常。 |
-| **F2** | `transformer.py:20` | 模型实例化阶段崩溃 | `nn.TransformerEncoder(..., norm="T")`。PyTorch 规范要求 `norm` 参数为 `nn.Module` 实例或 `None`。传入字符串字面量 `"T"` 违反类型签名契约。 | 解释器在构造计算图时立即抛出 `TypeError`，训练从未启动。 |
-| **F3** | `transformer.py:8` | 脚本启动导入失败 | 脚本引用 `from data_loader import transformer_loader`。该数据加载模块从未在代码仓库中提交。 | 缺少必需的依赖文件，抛出 `ModuleNotFoundError`。 |
-| **F4** | `transformer.py:22,82` | 损失计算与数值梯度失真 | 模型最后一层显式包含 `nn.Softmax()` 输出概率向量，而目标损失函数配置为 `nn.BCELoss()`。 | `BCELoss` 数学定义假定输入未经过激活或需匹配特定 Sigmoid 尺度；将多类归一化单纯形（Simplex）强行套用二元交叉熵，导致对数反向传播梯度尺度失真。 |
-| **F5** | `transformer123.py:24` | 任务目标与推理头冲突 | 竞赛主基准与 README 均规定主要目标为 NC vs AD 二分类，但网络顶层线性头配置为 3 维输出，并在 `test123.py:84` 执行 `prediction + 1` 强制重映射。 | 同一仓库混合了互不兼容的二分类与三分类逻辑，使得历史评测指标无法被唯一定义与复现。 |
-| **F6** | `test.py:78-95` | 测试评估决策严重偏倚 | 集成表决逻辑硬编码：向类 1 累加所有模型的**最大预测概率**，向类 2 累加所有模型的**最小预测概率**，随后无条件除以 3。 | 决策超平面被严重扭曲，决策平局与数值偏置无条件倾向于 AD 类，产生严重虚高或虚假的阳性预测。 |
-| **F7** | `test.py:53-54` | 特征结构被大面积抹除 | 脚本判定若一行包含任何一个 NaN，则执行 `one_[one_ != 0] = 0`。 | 单个空间节点的弥散张量丢失，导致该白质纤维束其余 99 个有效测量节点的物理生物学信号被无差别置零，破坏了微结构完整性表征。 |
-| **F8** | `transformer.py:16` | 张量拓扑形状与数据源脱节 | 网络嵌入层维度硬编码为 20 个 Token（对应 20 条纤维束）。然而 AI4AD 官方竞赛数据解剖规范仅包含 18 条白质纤维束。 | 特征矩阵与网络权重无法对齐，若无外部未记录的填充处理则引发张量重排越界。 |
+This document catalogs the structural and mathematical defects in the original 2020 course submission scripts (`legacy/`). These notes serve as root-cause documentation for the modern `dit` rewrite.
 
 ---
 
-## 2. 替代执行方案 (Production Replacements)
+## 1. Defect Architecture Overview
 
-所有历史实验功能已由 `dit/` 模块重写，对应替换方案如下：
-
-```bash
-# 替代原始 ML.py: 运行带无偏折内流水线的线性 SVM 评测
-python -m dit.cli evaluate --synthetic --model linear_svm
-
-# 替代原始 transformer.py: 运行遵循 3D 张量拓扑的 Tract-Transformer
-python -m dit.cli evaluate --synthetic --model tract_transformer --deep-epochs 120
-
-# 替代原始 test.py: 运行具备完整性签名的确定性推理引擎
-python -m dit.cli predict --mat MCAD_AFQ_test.mat --artifact artifacts/model.joblib --out predictions.csv
 ```
+Legacy Pipeline Failure Points:
+
+Input Data (.mat)
+       |
+       v [F8: Hardcoded 20 tracts; official AFQ protocol has 18 tracts]
+Tensor Reshaping
+       |
+       v [F7: Single NaN in a tract zeroes out all 100 valid node measurements]
+Feature Normalization
+       |
+       v [F1: Label extracted via label.index(max(label)) -> collapses all labels to 0]
+Dataset Input
+       |
+       +---------------------------------+---------------------------------+
+       |                                 |                                 |
+       v (ML.py)                         v (transformer.py)                v (test.py)
+`fit()` crashes on single class    [F2: norm="T" raises TypeError]   [F6: Voting sums max prob
+                                   [F3: data_loader.py missing]           for class 1 and min prob
+                                   [F4: Softmax feeding BCELoss]          for class 2]
+```
+
+---
+
+## 2. Root Cause Analysis
+
+### F1: Label Extraction Returns Index 0 for All Samples
+- **Location**: `ML.py:25-26`
+- **Mechanism**: The code extracts labels using `max_index = label.index(max(label))`. The raw labels are single-element lists (e.g., `[1]` for NC, `[3]` for AD). For any single-element list, the maximum element is at index 0. Every sample received label `0`.
+- **Impact**: `train_label` became a constant vector of zeros. `RandomForestClassifier.fit()` crashed with `ValueError: This solver needs samples of at least 2 classes`.
+
+### F2: Invalid `norm="T"` Argument
+- **Location**: `transformer.py:20`, `transformer123.py:18`
+- **Mechanism**: Instantiated with `nn.TransformerEncoderLayer(..., norm="T")`. In PyTorch, `norm` must be an `nn.Module` or `None`.
+- **Impact**: PyTorch raised `TypeError` at model construction. Training never executed.
+
+### F3: Missing Data Loader Dependencies
+- **Location**: `transformer.py:8`, `test.py:8`
+- **Mechanism**: Scripts imported `from data_loader import transformer_loader`. `data_loader.py` was never committed to the repository.
+- **Impact**: Scripts crashed on import with `ModuleNotFoundError`.
+
+### F4: Softmax Layer Combined with `BCELoss`
+- **Location**: `transformer.py:22,82`
+- **Mechanism**: The network output ended with `nn.Softmax()`, and the training loop used `nn.BCELoss()`.
+- **Impact**: Applying binary cross-entropy to a multi-class softmax probability simplex distorts log-likelihood gradients. Logits should feed `nn.CrossEntropyLoss` directly.
+
+### F5: Contradictory Binary vs Multiclass Targets
+- **Location**: `transformer123.py:24`, `test123.py:84`
+- **Mechanism**: The competition primary benchmark was binary NC vs AD classification. However, `transformer123.py` defined a 3-class output head, and `test123.py` applied a `prediction + 1` remapping patch.
+- **Impact**: Contradictory targets existed in the same repository, preventing reproducible evaluation.
+
+### F6: Distorted Ensemble Voting Logic
+- **Location**: `test.py:78-95`
+- **Mechanism**: Ensemble voting summed the maximum predicted probability for class 1 and the *minimum* predicted probability for class 2 across models, then divided by 3.
+- **Impact**: Ties and low-confidence predictions systematically favored class 2 (AD), producing biased positive predictions.
+
+### F7: Destructive NaN Replacement
+- **Location**: `test.py:53-54`
+- **Mechanism**: The script checked `if math.isnan(np.sum(one_)): one_[one_ != 0] = 0`.
+- **Impact**: If any single node in a 100-node profile was NaN, the entire row's valid measurements were set to zero, destroying biological signals.
+
+### F8: Hardcoded Tract Dimensions
+- **Location**: `test.py:43,48,63`
+- **Mechanism**: The feature shape was hardcoded as `(20, 100)`. The official AI4AD dataset contains 18 tracts.
+- **Impact**: The scripts assumed 20 tokens without validating anatomical tract dimensions, causing dimension mismatches.
+
+---
+
+## 3. Production Replacements in `dit`
+
+All legacy workflows are superseded by the `dit` package:
+
+| Legacy Script | Replacement Command | Description |
+|---|---|---|
+| `ML.py` | `python -m dit.cli evaluate --synthetic --model linear_svm` | Classical pipeline with in-fold imputation, scaling, and CV. |
+| `transformer.py` | `python -m dit.cli evaluate --synthetic --model tract_transformer` | Tract-Transformer with 3D attention and domain alignment. |
+| `test.py` | `python -m dit.cli predict --artifact artifacts/model.joblib --out pred.csv` | SHA-256 verified inference with input schema validation. |
