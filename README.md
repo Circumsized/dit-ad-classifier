@@ -81,7 +81,7 @@ Verify the installation:
 # Core suite (411 passed, 11 skipped without torch)
 pytest -q
 
-# Full suite (524 passed with torch)
+# Full suite (525 passed with torch)
 pytest -q
 ```
 
@@ -394,7 +394,7 @@ DIT-/
 ├── legacy/                      Unmaintained 2020 course scripts (for reference only)
 │   ├── _DO_NOT_RUN.md           Bug catalog of original submission scripts
 │   └── afq2020_reference/       Archived 2020 upstream source code
-└── tests/                       Test suite (524 tests)
+└── tests/                       Test suite (525 tests)
 ```
 
 ---

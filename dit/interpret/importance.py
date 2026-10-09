@@ -126,13 +126,17 @@ def _find_coefficients(model) -> np.ndarray | None:
     """Locate ``coef_``, descending through calibration and search wrappers."""
 
     current = model
-    for _ in range(6):
+    for _ in range(8):
         coef = getattr(current, "coef_", None)
         if coef is not None:
             return coef
+        if hasattr(current, "steps"):
+            current = list(dict(current.steps).values())[-1]
+            continue
         calibrated = getattr(current, "calibrated_classifiers_", None)
         if calibrated:
-            current = calibrated[0].estimator
+            inner_est = calibrated[0].estimator
+            current = inner_est
             continue
         best = getattr(current, "best_estimator_", None)
         if best is not None and best is not current:
