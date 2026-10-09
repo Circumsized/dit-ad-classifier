@@ -172,6 +172,32 @@ def test_interpret_exports_the_panel_renderer() -> None:
     assert callable(render_metric_panel)
 
 
+def test_interpret_runs_end_to_end_on_profile_view(tmp_path) -> None:
+    """End-to-end regression: interpret extracts coefficients and exports heatmaps."""
+
+    from dit.cli.main import main
+
+    exit_code = main(
+        [
+            "interpret",
+            "--synthetic",
+            "--n-samples",
+            "50",
+            "--view",
+            "profile",
+            "--out",
+            str(tmp_path),
+            "--quiet",
+        ]
+    )
+    assert exit_code == 0
+    assert (tmp_path / "interpret.json").is_file()
+    heatmaps_dir = tmp_path / "heatmaps"
+    assert heatmaps_dir.is_dir()
+    png_files = list(heatmaps_dir.glob("*.png"))
+    assert len(png_files) > 0
+
+
 def test_version_flag_reports_the_package_version(capsys) -> None:
     import dit
 
