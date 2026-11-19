@@ -42,7 +42,14 @@ def smooth_profiles(X: np.ndarray, window: int = 1) -> np.ndarray:
 
 @dataclass
 class TractFeaturePreprocessor:
-    """Fit imputation and standardization using training data only."""
+    """Fit imputation and standardization using training data only.
+
+    Not fold-safe on its own: the fit statistics come from whatever rows you
+    pass, so fitting on the whole dataset is a leak. Fit per training fold.
+    The production evaluation path uses the sklearn pipeline in
+    ``make_search_estimator``, which refits these steps inside every inner
+    fold; this class is the standalone/reference form.
+    """
 
     smooth_window: int = 1
     include_covariates: bool = True
