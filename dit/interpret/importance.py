@@ -21,10 +21,13 @@ def block_permutation_importance(
 ) -> dict[str, object]:
     """Shuffle each (tract, metric) block at a time and measure the score drop.
 
-    Only the held-out rows are permuted, so the drop reflects out-of-sample
-    dependence rather than how well the model memorised the training block.  A
-    negative score means shuffling helped, which usually means the block is
-    noise the model was fitting.
+    The estimator is fitted on every row before this runs, so the score is
+    measured *in-sample*: the held-out split only fixes which rows get
+    permuted and scored, it does not hold them out of the fit.  Read the drop
+    as "how much this block carries the fitted model's decisions", not as an
+    out-of-sample effect — only the outer-CV reports are a performance
+    estimate.  A negative score means shuffling helped, which usually means
+    the block is noise the model was fitting.
     """
 
     if not callable(getattr(estimator, "score", None)):
