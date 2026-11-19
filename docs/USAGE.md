@@ -348,7 +348,7 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out reports/interp
 ```
 
-系统在全量有标签数据上拟合线性判别模型，提取各节点权重绝对值并生成 $18 \times 100$ 维度的热力图矩阵。该命令在全量数据上单模型拟合，因此**不支持** `--select`、`--covariate residualize` 与 `--control-view`（三者均为折内评估步骤）：传入会以 `error:` 退出而非静默忽略。系统自动检验并对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
+系统在全量有标签数据上拟合线性判别模型，提取各节点权重绝对值并生成 $18 \times 100$ 维度的热力图矩阵。该命令在全量数据上单模型拟合，因此**不支持** `--select`、`--covariate residualize`、`--control-view` 与 `--alignment`（前两者为折内评估步骤，`--alignment` 是 Transformer 的训练期损失项，经典模型无对应物）：传入会以 `error:` 退出而非静默忽略。系统自动检验并对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
 
 | 结构代号 | 白质纤维束解剖全称 | 文献标记敏感节点区间 | 神经病理学相关性 |
 |---|---|---|---|

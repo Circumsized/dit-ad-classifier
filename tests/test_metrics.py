@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from sklearn.metrics import f1_score
 
-from dit.evaluation.metrics import classification_metrics
+from dit.evaluation.metrics import classification_metrics, expected_calibration_error
 
 
 def test_weighted_f1_uses_true_class_support() -> None:
@@ -76,3 +76,15 @@ def test_binary_view_single_class_fold_emits_no_disease_keys() -> None:
     assert "specificity" not in result
     assert "auc_disease" not in result
     assert result["class_recall"]["0"] == pytest.approx(0.8)
+
+
+def test_ece_refuses_a_degenerate_bin_count() -> None:
+    # n_bins=0/-1 used to build zero/one-edge linspace, execute nothing and
+    # silently return 0.0 -- a perfectly calibrated-looking number from a
+    # broken call.
+    y = np.array([0, 1, 0, 1])
+    probabilities = np.tile([[0.6, 0.4], [0.4, 0.6]], (2, 1))
+    with pytest.raises(ValueError, match="n_bins"):
+        expected_calibration_error(y, probabilities, n_bins=0)
+    with pytest.raises(ValueError, match="n_bins"):
+        expected_calibration_error(y, probabilities, n_bins=-1)

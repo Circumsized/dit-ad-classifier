@@ -34,6 +34,13 @@ LITERATURE_REGIONS: tuple[tuple[str, int, int], ...] = (
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Windows rejects these as bare filenames regardless of extension.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
 
 def _safe_filename_component(name: str) -> str:
     """Reduce an arbitrary label to a single safe path component.
@@ -54,6 +61,11 @@ def _safe_filename_component(name: str) -> str:
     # name is arbitrary, so cap the stem; render_metric_panel's collision
     # loop keeps truncated names unique.
     cleaned = cleaned[:100].rstrip(".")
+    # The only call site prefixes "importance_", so a device name can never
+    # become the file's basename today; the guard keeps the helper safe if
+    # it is ever reused without that prefix.
+    if cleaned.upper() in _WINDOWS_DEVICE_NAMES:
+        cleaned += "_dev"
     return cleaned or "metric"
 
 
@@ -135,7 +147,14 @@ def render_node_heatmap(
     if out_path is not None:
         target = Path(out_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(target, dpi=150)
+        try:
+            figure.savefig(target, dpi=150)
+        except OSError as exc:
+            # A failed savefig leaves a truncated file behind: delete it and
+            # report with the path, instead of a bare traceback plus garbage
+            # on disk (a too-long path or a full disk both land here).
+            target.unlink(missing_ok=True)
+            raise ValueError(f"could not write heatmap {target}: {exc}") from exc
     if show:
         plt.show()
     plt.close(figure)
@@ -148,8 +167,12 @@ def render_metric_panel(
     *,
     out_dir: str | Path,
     title_prefix: str = "AI4AD feature importance",
-) -> list[Path]:
-    """Render one heatmap per diffusion metric present in the ranking."""
+) -> list[tuple[int, Path]]:
+    """Render one heatmap per diffusion metric present in the ranking.
+
+    Returns ``(metric index, path)`` pairs: the sanitised filename no longer
+    identifies the metric, so callers need the pairing to report it.
+    """
 
     # (metric index, path) pairs: the cleaned filename no longer identifies
     # the metric, so the caller needs the pairing to report it.

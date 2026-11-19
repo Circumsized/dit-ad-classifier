@@ -282,8 +282,12 @@ def write_json(path: str | Path, payload: dict[str, object]) -> Path:
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    # _json_safe here, not at each call site: an ablation row or a report
+    # section that grows a non-finite float must land as null, not crash
+    # strict serialisation with an opaque ValueError.
     target.write_text(
-        json.dumps(payload, indent=2, sort_keys=False, allow_nan=False), encoding="utf-8"
+        json.dumps(_json_safe(payload), indent=2, sort_keys=False, allow_nan=False),
+        encoding="utf-8",
     )
     return target
 
@@ -300,7 +304,7 @@ def render_markdown(payload: dict[str, object]) -> str:
         "## Configuration",
         "",
         "```json",
-        json.dumps(config, indent=2),
+        json.dumps(_json_safe(config), indent=2, allow_nan=False),
         "```",
         "",
         "## Dataset",
@@ -376,6 +380,17 @@ _MD_CELL_ESCAPES = str.maketrans(
         "]": r"\]",
         "\n": " ",
         "\r": " ",
+        # Every separator str.splitlines() honours, not just \n/\r: a caveat
+        # that only smuggles \u2028 would forge a heading for any consumer
+        # that walks the report by Python line semantics.
+        "\v": " ",
+        "\f": " ",
+        "\x1c": " ",
+        "\x1d": " ",
+        "\x1e": " ",
+        "\x85": " ",
+        "\u2028": " ",
+        "\u2029": " ",
     }
 )
 
@@ -415,7 +430,11 @@ def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
         # Caveats and reasons reach the report through this public API, so
         # they get the same cell escaping as the table: an unescaped newline
         # in a caller-supplied string would forge headings and tables.
-        for caveat in comparison.get("caveats", []):
+        caveats = comparison.get("caveats") or []
+        if isinstance(caveats, str) or not isinstance(caveats, (list, tuple)):
+            # A bare string would iterate one character per blockquote line.
+            caveats = [str(caveats)]
+        for caveat in caveats:
             lines.append(f"> {md_cell(caveat)}")
         if comparison.get("reason"):
             lines.append(f"> {md_cell(comparison['reason'])}")

@@ -33,7 +33,7 @@ dependencies = [
 # package never calls torch.load, but requiring a patched build costs nothing
 # and keeps dependency scanners honest.
 torch = ["torch>=2.6"]
-dev = ["pytest>=7", "pytest-cov>=4"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.6"]
 
 [project.scripts]
 dit = "dit.cli.main:main"
@@ -48,3 +48,14 @@ include = ["dit*"]
 testpaths = ["tests"]
 addopts = "-ra"
 filterwarnings = ["error::UserWarning:numpy"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# F821 (undefined name) is the check that catches a dead-code deletion
+# leaving an unreachable block behind -- py_compile and pytest cannot see
+# those. F841 flags assigned-but-unused locals. Everything else stays off:
+# this is a correctness net, not a style gate.
+select = ["F821", "F841", "E9"]

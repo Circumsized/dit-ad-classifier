@@ -295,3 +295,37 @@ def test_selection_enforces_hard_feature_cap() -> None:
     for fold in result.folds:
         # 80 anatomical columns plus the two trailing covariate columns.
         assert fold["n_features_used"] <= 80 + 2
+
+
+class TestPerSiteMetricsSemantics:
+    """per_site_metrics' "balanced_accuracy" averages recalls over the classes
+    observed at that site only: a single-class site reports the recall of its
+    one class, not a task-level balanced accuracy.  The name is historical;
+    these tests pin the shipped semantics so the site table cannot drift
+    without a conscious decision.
+    """
+
+    def _rows(self):
+        site = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+        y = np.array([0, 0, 1, 1, 0, 0, 0, 0])
+        pred = np.array([0, 1, 1, 1, 0, 0, 1, 1])
+        return site, y, pred
+
+    def test_mixed_site_averages_both_class_recalls(self) -> None:
+        site, y, pred = self._rows()
+        rows = per_site_metrics(site, y, pred, label_map={0: "NC", 1: "AD"})
+        assert rows[0]["classes"] == {"NC": 2, "AD": 2}
+        # class 0 recall 1/2, class 1 recall 2/2
+        assert rows[0]["balanced_accuracy"] == pytest.approx(0.75)
+        assert rows[0]["accuracy"] == pytest.approx(0.75)
+
+    def test_single_class_site_reports_the_observed_recall_only(self) -> None:
+        site, y, pred = self._rows()
+        rows = per_site_metrics(site, y, pred, label_map={0: "NC", 1: "AD"})
+        # Site 1 holds only NC: the value is NC recall (2/4), not a balanced
+        # accuracy that could never be computed there.
+        assert rows[1]["classes"] == {"NC": 4}
+        assert rows[1]["balanced_accuracy"] == pytest.approx(0.5)
+        import json
+
+        json.dumps(rows, allow_nan=False)

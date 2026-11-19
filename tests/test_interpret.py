@@ -384,3 +384,11 @@ class TestInterpretRefusesUnimplementedFlags:
             )
         assert str(raised.value).startswith("error:")
         assert expected in str(raised.value)
+
+    def test_windows_device_names_are_never_a_bare_stem(self) -> None:
+        # The only call site prefixes "importance_", but the helper must not
+        # hand out a device name if it is ever reused without that prefix.
+        from dit.interpret.heatmap import _safe_filename_component
+
+        for device in ("CON", "PRN", "AUX", "NUL", "COM1", "LPT9"):
+            assert _safe_filename_component(device) != device

@@ -32,5 +32,5 @@ dist/
 artifacts/
 
 # --- interpret heatmap probe outputs (filename sanitiser development) ---
-importance_*.png
-panel_*/
+**/importance_*.png
+/panel_*/
