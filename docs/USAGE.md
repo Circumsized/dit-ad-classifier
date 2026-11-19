@@ -355,7 +355,13 @@ python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out 
 | `UF_L` | 左侧钩束 (Uncinate Fasciculus) | 节点 75 至 100 (额叶端连接区) | 早期边缘系统与额叶解剖断连 |
 | `ATR_L` | 左侧丘脑前辐射 (Anterior Thalamic Radiation)| 节点 1 至 13 (丘脑前核投射区) | 胆碱能投射纤维受损 |
 | `CC_ForcepsMajor` | 胼胝体压部 (Splenium / Forceps Major) | 节点 1 至 10 (枕叶与后顶叶交汇区) | 半球间顶下皮质后部通讯退化 |
-| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) | 默认网络（DMN）核心中继节点 |
+| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) ⚠️ 区间待证 | 默认网络（DMN）核心中继节点 |
+
+> **区间争议（待证）**：`CGC_L` 一行与代码实现不一致——`dit/interpret/heatmap.py` 的
+> `LITERATURE_REGIONS` 中 `cingulum` 为节点 1–10，本表为 40–60。2026-11-19 的外部
+> 文献检索未找到可核验来源支持任一区间（本表自身亦不带引用），因此**代码保持现状
+> （1–10）未改**，仅在此记录争议。在取得可引用来源前，涉及扣带回的 `literature_hits`
+> 命中结论不应单独作为证据引用。其余区段两侧一致。
 
 ---
 
