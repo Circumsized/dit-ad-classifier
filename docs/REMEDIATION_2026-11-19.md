@@ -73,6 +73,6 @@
 
 ```bash
 cd DIT-
-.venv/Scripts/python.exe -m pytest tests/ -q        # 645 passed
-git diff b33c8c7..HEAD --stat                       # 11 个修复 commit
+.venv/Scripts/python.exe -m pytest tests/ -q        # 637 passed
+git diff b33c8c7..HEAD --stat                       # 修复 commit 全集
 ```

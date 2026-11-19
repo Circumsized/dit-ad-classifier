@@ -313,7 +313,7 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 |   python -m dit.cli predict --mat test.mat --artifact artifacts/model.joblib --out pred.csv|
 |          │                                                                                  |
 |          ├── 1. 签名核验: 计算工件实时 SHA-256 并与 .sha256 侧车完全匹配                    |
-|          ├── 2. 受限反序列化: RestrictedUnpickler 拦截非白名单命名空间                      |
+|          ├── 2. 受限反序列化: _ArtifactUnpickler 拦截非白名单命名空间                      |
 |          ├── 3. 特征矩阵重建: 依据工件固化的 FeatureLayout 解构盲测数据                     |
 |          ├── 4. 列契约校验: 特征列数必须严格等于 layout.total_features                      |
 |          └── 5. 导出结构化结果: 包含受试者 ID、预测编码、类名及后验概率矩阵                 |
@@ -322,7 +322,7 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 
 ### 6.1 反序列化安全白名单机制
 
-为了防范恶意反序列化代码执行风险，`dit.deployment.RestrictedUnpickler` 将类加载空间严格限制于以下基础根命名空间：
+为了防范恶意反序列化代码执行风险，`dit.deployment._ArtifactUnpickler` 将类加载空间严格限制于以下基础根命名空间：
 - `numpy`
 - `scipy`
 - `sklearn`
