@@ -8,7 +8,7 @@ decision is made on outer-fold training rows only.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np

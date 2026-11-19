@@ -31,10 +31,3 @@ def l1_ratio_kwargs(l1_ratio: float, solver: str) -> dict[str, object]:
     return {"penalty": penalty, "l1_ratio": l1_ratio, "solver": solver}
 
 
-def has_new_logistic_api() -> bool:
-    """True on sklearn releases where ``penalty`` is deprecated."""
-
-    from sklearn import __version__ as sklearn_version
-
-    parts = tuple(int(part) for part in sklearn_version.split(".")[:2])
-    return parts >= (1, 8)

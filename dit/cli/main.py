@@ -41,7 +41,6 @@ from dit.evaluation.reporting import (
     write_json,
     write_markdown,
 )
-from dit.evaluation.runner import EvaluationResult
 from dit.evaluation.site_balance import per_site_metrics, site_composition
 from dit.models.classical import (
     build_feature_matrix,
@@ -431,7 +430,7 @@ def cmd_ablation(args: argparse.Namespace) -> int:
     payload = _bundle(
         payloads,
         dataset,
-        {"ablation": experiment_payload_of_base(base), **base},
+        {"ablation": base, **base},
         include_covariate_comparisons=True,
     )
     written = _write_all(args.out, payload, "ablation")

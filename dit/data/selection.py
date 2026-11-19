@@ -282,24 +282,6 @@ class SparseBlockSelector:
             "block_scores": self.block_scores_,
         }
 
-    @staticmethod
-    def make_pipeline(
-        layout: FeatureLayout,
-        estimator_factory,
-        *,
-        top_blocks: int | None = None,
-        keep_fraction: float = 0.05,
-        seed: int = 42,
-    ):
-        """Return an sklearn pipeline with fold-local selection in front of a model."""
-
-        from sklearn.impute import SimpleImputer
-        from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import StandardScaler
-
-        selector = SparseBlockSelector(
-            layout, top_blocks=top_blocks, keep_fraction=keep_fraction, seed=seed
-        )
         return Pipeline(
             [
                 ("selector", selector),
