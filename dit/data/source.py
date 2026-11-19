@@ -161,7 +161,13 @@ def _split_target(url: str) -> FetchTarget:
     if port not in ALLOWED_PORTS:
         raise UnsafeURL(f"port {port} is not allowed; use {sorted(ALLOWED_PORTS)}")
 
-    return FetchTarget(scheme, host, port, parsed.path or "/", url)
+    # The query string is part of the request target: dropping it silently
+    # requests a different resource (signed/versioned URLs 404 or return the
+    # wrong body).  The fragment is never sent by http.client and stays out.
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return FetchTarget(scheme, host, port, path, url)
 
 
 def resolve_host(host: str, resolver: Resolver | None = None) -> list[ipaddress._BaseAddress]:
@@ -401,11 +407,14 @@ def safe_request(
                     if total > max_bytes:
                         raise FetchError(f"response exceeds limit of {max_bytes} bytes")
                     chunks.append(chunk)
-            except OSError as exc:
+            except (OSError, http.client.HTTPException) as exc:
                 raise FetchError(f"reading {target.host} failed: {exc}") from exc
 
             return b"".join(chunks), target
-        except (OSError, ssl.SSLError) as exc:
+        # UnsafeURL is a ValueError raised on the validation path *above* this
+        # try, so policy refusals are never wrapped; do not add ValueError
+        # here, it would swallow them if validation ever moves inside.
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
             raise FetchError(f"request to {target.host} failed: {exc}") from exc
         finally:
             connection.close()

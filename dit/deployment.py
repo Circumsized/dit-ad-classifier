@@ -252,8 +252,20 @@ def load_deployment_artifact(path: str | Path) -> DeploymentModel:
     payload_dict = _ArtifactUnpickler(io.BytesIO(payload)).load()
     if not isinstance(payload_dict, dict) or payload_dict.get("artifact_version") != ARTIFACT_VERSION:
         raise ValueError(f"{source} is not a version-{ARTIFACT_VERSION} deployment artifact")
-    config_values = dict(payload_dict["config"])
-    config = ExperimentConfig(**config_values)
+    # A missing or renamed config section is a corrupt/incompatible artifact,
+    # not a crash: the CLI contract (cli/main.py) only catches ValueError.
+    try:
+        config_values = dict(payload_dict["config"])
+        config = ExperimentConfig(**config_values)
+    except KeyError as exc:
+        raise ValueError(
+            f"{source} has no config section; it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        ) from exc
+    except TypeError as exc:
+        raise ValueError(
+            f"deployment artifact config is incompatible with this version: {exc}"
+        ) from exc
     return DeploymentModel(
         pipeline=payload_dict["pipeline"],
         config=config,
