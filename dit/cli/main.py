@@ -37,6 +37,7 @@ from dit.evaluation.reporting import (
     assemble_report,
     build_covariate_ablation_comparisons,
     environment_fingerprint,
+    md_cell,
     write_json,
     write_markdown,
 )
@@ -299,6 +300,18 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _csv_safe(value: object) -> str:
+    """Neutralise spreadsheet formula injection in a data-controlled cell.
+
+    Subject identifiers come from the data file and land in the first CSV
+    column; a leading ``=``, ``+``, ``-``, ``@``, tab or CR would otherwise be
+    evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
+    """
+
+    text = str(value)
+    return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r"} else text
+
+
 def _write_rad_scores(
     out_dir: str | Path,
     dataset: DatasetBundle,
@@ -335,7 +348,7 @@ def _write_rad_scores(
         writer.writerow(columns)
         for index in range(view.n_samples):
             row = [
-                str(subject_ids[index]),
+                _csv_safe(subject_ids[index]),
                 name_of[int(labels[index])],
                 name_of[int(predictions[index])],
                 f"{float(probabilities[index, disease]):.6f}",
@@ -467,9 +480,9 @@ def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], wr
     for row in rows:
         lines.append(
             "| {model} | {view} | {cov} | {acc:.3f} | {bal:.3f} | {f1:.3f} | {auc} | {am:.3f} | {thr:.2f} |".format(
-                model=row["model"],
-                view=row["view"],
-                cov=row["covariate_strategy"],
+                model=md_cell(row["model"]),
+                view=md_cell(row["view"]),
+                cov=md_cell(row["covariate_strategy"]),
                 acc=float(row["accuracy"]),
                 bal=float(row["balanced_accuracy"]),
                 f1=float(row["macro_f1"]),
@@ -628,7 +641,7 @@ def cmd_predict(args: argparse.Namespace) -> int:
         for index in range(dataset.n_samples):
             writer.writerow(
                 [
-                    str(subject_ids[index]),
+                    _csv_safe(subject_ids[index]),
                     int(predictions[index]),
                     outcome["predicted_names"][index],
                     *[float(probabilities[index, column]) for column in range(len(class_names))],
