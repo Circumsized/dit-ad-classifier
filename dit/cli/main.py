@@ -492,6 +492,25 @@ def cmd_interpret(args: argparse.Namespace) -> int:
 
     dataset = _load_dataset(args)
     config = _config_from_args(args)
+    if config.enable_selection:
+        raise ValueError(
+            "interpret does not support --select: block/node selection is a "
+            "fold-local evaluation step, and the interpretation path fits one "
+            "model on every labeled row. Run evaluate with --select for the "
+            "selection diagnostics."
+        )
+    if config.covariate_strategy == "residualize":
+        raise ValueError(
+            "interpret does not support --covariate residualize: residualisation "
+            "is fitted inside evaluation folds, and the interpretation path has "
+            "no folds. Use --covariate feature or none."
+        )
+    if config.control_view is not None:
+        raise ValueError(
+            f"interpret does not support --control-view {config.control_view!r}: "
+            "control views are evaluation inputs, and the interpretation path "
+            "explains one fitted model. Run evaluate with the control view."
+        )
     view = dataset.task_view(config.task)
     if view.y is None:
         raise SystemExit("interpretation requires labels")

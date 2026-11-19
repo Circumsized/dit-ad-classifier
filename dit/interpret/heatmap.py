@@ -11,6 +11,7 @@ or at something else.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,21 @@ LITERATURE_REGIONS: tuple[tuple[str, int, int], ...] = (
     ("cc", 1, 10),
 )
 
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_filename_component(name: str) -> str:
+    """Reduce an arbitrary label to a single safe path component.
+
+    Whitelisting beats blacklisting: separators, colons, leading dots and
+    ``..`` all disappear, and stripping ``._`` afterwards removes hidden-file
+    and parent-directory spellings.  An all-metacharacter name falls back to
+    a stable placeholder rather than an empty stem.
+    """
+
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(name)).strip("._")
+    return cleaned or "metric"
+
 
 def node_matrix(
     importance_rows: list[dict[str, object]],
@@ -41,9 +57,12 @@ def node_matrix(
     """Reshape per-node importance into a [tracts, nodes] matrix.
 
     Rows and columns keep ``layout`` order so a figure can be compared
-    tract-by-tract against the anatomical listing.  Metrics not requested are
-    averaged out, which is appropriate when the ranking model was fit on all of
-    them; pass ``metric_index`` to show one diffusion metric alone.
+    tract-by-tract against the anatomical listing.  Rows from other metrics
+    are dropped, not averaged: only ``metric_index`` — or, for a
+    single-metric ``metric`` layout, the layout's own metric — is placed on
+    the node axis, so a multi-metric ranking needs one call (or
+    :func:`render_metric_panel`) per metric.  On a multi-metric layout with
+    ``metric_index=None`` nothing is placed and the matrix stays zero.
     """
 
     if layout.kind == "summary":
@@ -125,6 +144,7 @@ def render_metric_panel(
 
     targets: list[Path] = []
     seen: set[int] = set()
+    used_names: set[str] = set()
     for row in importance_rows:
         metric = int(row["metric_index"])
         if metric in seen or metric >= layout.n_metrics:
@@ -134,11 +154,18 @@ def render_metric_panel(
         if not np.any(matrix):
             continue
         title = f"{title_prefix} - {layout.metric_names[metric]}"
+        # Metric names are .mat struct field names, i.e. arbitrary strings:
+        # they reach the filesystem here, so reduce each to one safe
+        # component before it becomes part of a path.
+        name = _safe_filename_component(layout.metric_names[metric])
+        if name in used_names:
+            name = f"{name}_{metric}"
+        used_names.add(name)
         target = render_node_heatmap(
             matrix,
             layout.tract_names,
             title=title,
-            out_path=Path(out_dir) / f"importance_{layout.metric_names[metric]}.png",
+            out_path=Path(out_dir) / f"importance_{name}.png",
         )
         if target is not None:
             targets.append(target)
