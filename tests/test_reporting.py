@@ -278,3 +278,50 @@ def test_paired_comparison_section_renders_and_serializes_strictly(tmp_path) -> 
 def test_write_json_refuses_nonstandard_nan(tmp_path) -> None:
     with pytest.raises(ValueError, match="Out of range"):
         write_json(tmp_path / "bad.json", {"value": float("nan")})
+
+
+def test_markdown_tables_escape_data_controlled_cells() -> None:
+    """A hostile feature view or model name must not break the table row.
+
+    ``feature_view`` can be a .mat metric name and result keys embed model
+    names, so pipe/backtick/bracket metacharacters must be neutralised.
+    """
+    hostile = SimpleNamespace(
+        model="lin|ear`<b>[x](y)",
+        task="bin|ary",
+        split_strategy="stratif|ied",
+        feature_view="MD`</td>`",
+        aggregate={"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5, "roc_auc": None},
+        folds=(),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    row = next(line for line in render_markdown(payload).splitlines() if line.startswith("| lin"))
+    # 11 columns -> exactly 12 structural pipes (escaped \| do not split).
+    assert row.replace("\|", "").count("|") == 12
+    assert r"lin\|ear" in row
+    assert "&lt;b&gt;" in row
+    assert r"\[x\]" in row
+
+
+def test_paired_comparison_table_escapes_reference_and_candidate() -> None:
+    comparison = {
+        "reference": "mod|el`x`",
+        "candidate": "cand<y>",
+        "metric": "balanced_accuracy",
+        "n_pairs": 5,
+        "mean_delta": 0.01,
+        "p_value": 0.5,
+        "p_value_holm": 0.5,
+        "status": "comparable",
+    }
+    payload = assemble_report(
+        [], dataset_summary={}, configuration={}, paired_comparisons=[comparison]
+    )
+    row = next(
+        line
+        for line in render_markdown(payload).splitlines()
+        if line.startswith("| mod")
+    )
+    # 8 columns -> exactly 9 structural pipes (escaped \| do not split).
+    assert row.replace("\|", "").count("|") == 9
+    assert r"mod\|el" in row and "cand&lt;y&gt;" in row

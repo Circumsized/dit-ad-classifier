@@ -358,6 +358,29 @@ def write_markdown(path: str | Path, payload: dict[str, object]) -> Path:
     return target
 
 
+# Report tables are the one place data-controlled strings are interpolated
+# into Markdown structure (feature views can be .mat metric names, result
+# keys embed model names), so cell metacharacters are neutralised there.
+# JSON blocks need no equivalent: they are fenced and dumps-escaped.
+_MD_CELL_ESCAPES = str.maketrans(
+    {
+        "|": r"\|",
+        "`": r"\`",
+        "<": "&lt;",
+        ">": "&gt;",
+        "[": r"\[",
+        "]": r"\]",
+        "\n": " ",
+        "\r": " ",
+    }
+)
+
+
+def md_cell(value: object) -> str:
+    """Render one value as a Markdown table cell with metacharacters escaped."""
+    return str(value).translate(_MD_CELL_ESCAPES)
+
+
 def _json_block(value: object) -> str:
     return "```json\n" + json.dumps(value, indent=2, allow_nan=False) + "\n```"
 
@@ -375,14 +398,14 @@ def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
         mean = comparison.get("mean_delta")
         lines.append(
             "| {reference} | {candidate} | {metric} | {pairs} | {mean} | {raw} | {holm} | {status} |".format(
-                reference=comparison.get("reference", "-"),
-                candidate=comparison.get("candidate", "-"),
-                metric=comparison.get("metric", "-"),
+                reference=md_cell(comparison.get("reference", "-")),
+                candidate=md_cell(comparison.get("candidate", "-")),
+                metric=md_cell(comparison.get("metric", "-")),
                 pairs=comparison.get("n_pairs", 0),
                 mean="-" if mean is None else format(float(mean), "+.4f"),
                 raw="-" if raw_p is None else format(float(raw_p), ".4f"),
                 holm="-" if holm_p is None else format(float(holm_p), ".4f"),
-                status=comparison.get("status", "unknown"),
+                status=md_cell(comparison.get("status", "unknown")),
             )
         )
         for caveat in comparison.get("caveats", []):
@@ -405,10 +428,10 @@ def _results_table(results: list[dict[str, object]]) -> str:
         lines.append(
             "| {model} | {task} | {split} | {view} | {acc:.3f} | {auc} | {f1:.3f} | "
             "{bal:.3f} | {sens} | {spec} | {nfolds} |".format(
-                model=entry["model"],
-                task=entry["task"],
-                split=entry["split_strategy"],
-                view=entry["feature_view"],
+                model=md_cell(entry["model"]),
+                task=md_cell(entry["task"]),
+                split=md_cell(entry["split_strategy"]),
+                view=md_cell(entry["feature_view"]),
                 acc=float(aggregate["accuracy"]),
                 auc=(f"{float(aggregate['roc_auc']):.3f}" if aggregate.get("roc_auc") is not None else "-"),
                 f1=float(aggregate["macro_f1"]),

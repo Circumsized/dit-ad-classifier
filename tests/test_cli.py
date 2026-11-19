@@ -9,6 +9,7 @@ directly rather than inferred from behaviour.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -367,3 +368,38 @@ def test_missing_site_metadata_is_stated_not_silently_skipped() -> None:
         "site analysis skipped: site metadata contains missing (-1) values"
     )
     assert "per_site" not in report
+
+
+def test_csv_safe_neutralises_formula_prefixes() -> None:
+    from dit.cli.main import _csv_safe
+
+    for hostile in ('=HYPERLINK("http://x")', "+1", "-2", "@SUM(A1)", "\tTAB", "\rCR"):
+        assert _csv_safe(hostile) == "'" + hostile
+    for plain in ("sub-001", "0", "1.5", "NC"):
+        assert _csv_safe(plain) == plain
+
+
+def test_rad_scores_csv_prefixes_a_hostile_subject_id(tmp_path) -> None:
+    import csv
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _write_rad_scores
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig
+
+    bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=5)
+    bundle = replace(
+        bundle,
+        subject_id=np.array(["=cmd|' /C calc'!A0"] * 30 + ["+2"] * 30, dtype=object),
+    )
+    view = bundle.task_view("binary")
+    probabilities = np.tile([[0.9, 0.1], [0.2, 0.8]], (view.n_samples, 1))
+    result = SimpleNamespace(probabilities=probabilities, predictions=probabilities.argmax(axis=1))
+    path = _write_rad_scores(tmp_path, bundle, ExperimentConfig(task="binary"), result)
+    with path.open(encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    assert rows[0][0] == "subject_id"
+    assert rows[1][0] == "'=cmd|' /C calc'!A0"
+    assert "'+2" in {row[0] for row in rows[1:]}
