@@ -412,10 +412,13 @@ def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
                 status=md_cell(comparison.get("status", "unknown")),
             )
         )
+        # Caveats and reasons reach the report through this public API, so
+        # they get the same cell escaping as the table: an unescaped newline
+        # in a caller-supplied string would forge headings and tables.
         for caveat in comparison.get("caveats", []):
-            lines.append(f"> {caveat}")
+            lines.append(f"> {md_cell(caveat)}")
         if comparison.get("reason"):
-            lines.append(f"> {comparison['reason']}")
+            lines.append(f"> {md_cell(comparison['reason'])}")
     return "\n".join(lines)
 
 

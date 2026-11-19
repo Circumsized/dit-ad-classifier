@@ -307,7 +307,7 @@ class TestMetricPanelFilenames:
     def test_metric_names_cannot_escape_the_output_directory(self, tmp_path, metric_name) -> None:
         paths = render_metric_panel(self._rows(), self._layout((metric_name,)), out_dir=tmp_path)
         assert len(paths) == 1
-        target = paths[0]
+        target = paths[0][1]
         assert target.parent == tmp_path
         stem = target.name[: -len(".png")]
         assert stem.startswith("importance_")
@@ -318,8 +318,8 @@ class TestMetricPanelFilenames:
     def test_colliding_metric_names_get_distinct_files(self, tmp_path) -> None:
         paths = render_metric_panel(self._rows(n_metrics=2), self._layout(("MD", "MD ")), out_dir=tmp_path)
         assert len(paths) == 2
-        assert len({path.name for path in paths}) == 2
-        assert all(path.parent == tmp_path for path in paths)
+        assert len({path.name for _, path in paths}) == 2
+        assert all(path.parent == tmp_path for _, path in paths)
 
     def test_chained_collisions_all_get_distinct_files(self, tmp_path) -> None:
         # "_A" cleans to "A" (collides with metric 0), whose disambiguated
@@ -327,8 +327,29 @@ class TestMetricPanelFilenames:
         # enough, the third heatmap must not silently overwrite the second.
         paths = render_metric_panel(self._rows(n_metrics=3), self._layout(("A", "A_2", "_A")), out_dir=tmp_path)
         assert len(paths) == 3
-        assert len({path.name for path in paths}) == 3
-        assert all(path.parent == tmp_path for path in paths)
+        assert len({path.name for _, path in paths}) == 3
+        assert all(path.parent == tmp_path for _, path in paths)
+    def test_long_metric_names_are_truncated_not_fatal(self, tmp_path) -> None:
+        # Windows rejects path components over 255 characters; a .mat field
+        # name is arbitrary, so the stem is capped instead of raising OSError
+        # halfway through the panel.
+        paths = render_metric_panel(
+            self._rows(), self._layout(("M" * 300,)), out_dir=tmp_path
+        )
+        assert len(paths) == 1
+        target = paths[0][1]
+        assert target.parent == tmp_path
+        assert len(target.name) <= 120
+
+    def test_case_colliding_metric_names_get_distinct_files(self, tmp_path) -> None:
+        # .mat struct field names are case-sensitive and can coexist, but the
+        # filesystem is not: without a case-folded key the second heatmap
+        # would silently overwrite the first.
+        paths = render_metric_panel(self._rows(n_metrics=2), self._layout(("FA", "fa")), out_dir=tmp_path)
+        assert len(paths) == 2
+        assert len({path.name for _, path in paths}) == 2
+        assert len({path.name.casefold() for _, path in paths}) == 2
+        assert all(path.parent == tmp_path for _, path in paths)
 
 
 class TestInterpretRefusesUnimplementedFlags:
@@ -342,6 +363,7 @@ class TestInterpretRefusesUnimplementedFlags:
             (["--select"], "--select"),
             (["--covariate", "residualize"], "residualize"),
             (["--control-view", "demographics"], "control-view"),
+            (["--alignment", "coral"], "alignment"),
         ),
     )
     def test_refuses_flags_it_does_not_implement(self, tmp_path, extra, expected) -> None:

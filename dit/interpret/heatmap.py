@@ -50,6 +50,10 @@ def _safe_filename_component(name: str) -> str:
     """
 
     cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(name)).strip("._")
+    # Windows rejects path components over 255 characters and a .mat field
+    # name is arbitrary, so cap the stem; render_metric_panel's collision
+    # loop keeps truncated names unique.
+    cleaned = cleaned[:100].rstrip(".")
     return cleaned or "metric"
 
 
@@ -147,8 +151,12 @@ def render_metric_panel(
 ) -> list[Path]:
     """Render one heatmap per diffusion metric present in the ranking."""
 
-    targets: list[Path] = []
+    # (metric index, path) pairs: the cleaned filename no longer identifies
+    # the metric, so the caller needs the pairing to report it.
+    targets: list[tuple[int, Path]] = []
     seen: set[int] = set()
+    # Case-folded: NTFS is case-insensitive, so "FA" and "fa" would silently
+    # overwrite each other's file even though the names differ.
     used_names: set[str] = set()
     for row in importance_rows:
         metric = int(row["metric_index"])
@@ -169,10 +177,10 @@ def render_metric_panel(
         base = _safe_filename_component(layout.metric_names[metric])
         name = base
         attempt = 1
-        while name in used_names:
+        while name.casefold() in used_names:
             name = f"{base}_{metric}" if attempt == 1 else f"{base}_{metric}_{attempt}"
             attempt += 1
-        used_names.add(name)
+        used_names.add(name.casefold())
         target = render_node_heatmap(
             matrix,
             layout.tract_names,
@@ -180,7 +188,7 @@ def render_metric_panel(
             out_path=Path(out_dir) / f"importance_{name}.png",
         )
         if target is not None:
-            targets.append(target)
+            targets.append((metric, target))
     return targets
 
 

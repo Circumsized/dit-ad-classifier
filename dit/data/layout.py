@@ -210,6 +210,8 @@ class FeatureLayout:
     def describe(self) -> dict[str, object]:
         return {
             "kind": self.kind,
+            "tract_names": list(self.tract_names),
+            "metric_names": list(self.metric_names),
             "n_tracts": self.n_tracts,
             "n_metrics": self.n_metrics,
             "n_points": self.n_points,
