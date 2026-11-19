@@ -133,6 +133,52 @@ class ExperimentConfig:
     control_view: str | None = None
 
     def __post_init__(self) -> None:
+        # Type guards before range comparisons: a YAML config can deliver a
+        # string where a number is expected, and ``0 < "0.05"`` raises
+        # TypeError, which the CLI's ValueError-only contract does not catch.
+        for name in (
+            "n_splits",
+            "inner_splits",
+            "smooth_window",
+            "seed",
+            "n_jobs",
+            "deep_epochs",
+            "deep_batch_size",
+            "deep_patience",
+            "deep_d_model",
+            "deep_layers",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise ValueError(
+                    f"{name} must be an integer, got {type(value).__name__}"
+                )
+        for name in ("top_blocks", "max_features"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, np.integer))
+            ):
+                raise ValueError(
+                    f"{name} must be an integer or null, got {type(value).__name__}"
+                )
+        if isinstance(self.keep_fraction, bool) or not isinstance(
+            self.keep_fraction, (int, float, np.floating)
+        ):
+            raise ValueError(
+                f"keep_fraction must be a number, got {type(self.keep_fraction).__name__}"
+            )
+        # A bare string is iterable, so the duplicate check below would report
+        # "must not repeat a model" for a plain scalar.
+        if isinstance(self.ensemble_models, str) or not isinstance(
+            self.ensemble_models, (tuple, list)
+        ):
+            raise ValueError(
+                "ensemble_models must be a sequence of model names, not "
+                f"{type(self.ensemble_models).__name__}"
+            )
+        # Normalise to a tuple so a config that crossed JSON/YAML (list) still
+        # round-trips equal to the in-memory one.
+        object.__setattr__(self, "ensemble_models", tuple(self.ensemble_models))
         if self.covariate_strategy not in COVARIATE_STRATEGIES:
             raise ValueError(
                 f"unknown covariate_strategy {self.covariate_strategy!r}; "

@@ -9,6 +9,7 @@ against a genuine MATLAB container rather than a hand-rolled dict.
 from __future__ import annotations
 
 import numpy as np
+from dataclasses import replace
 import pytest
 from scipy.io import savemat
 
@@ -476,3 +477,45 @@ class TestContractErrors:
         bundle = load_ai4ad_mat(tmp_path / "data.mat")
         assert not bundle.mask[0, 0, 0, 0]
         assert bundle.mask.sum() == bundle.X.size - 1
+
+
+class TestAmbiguousRawCoding:
+    """A canonical {1,2} file is indistinguishable from an official {1,2} file.
+
+    Official wins, matching the AI4AD convention; the docstring records the
+    ambiguity and the binary view refuses. This pins the current behaviour so
+    a future change to the tie-break is deliberate.
+    """
+
+    def _write_labels(self, tmp_path, labels, *, seed: int = 21) -> None:
+        rng = np.random.default_rng(seed)
+        n_samples = len(labels)
+        _write(
+            {
+                "train_set": rng.normal(0.5, 0.2, (n_samples, 6, 40, 3)),
+                "train_diagnose": np.asarray(labels, dtype=np.int64),
+                "train_population": np.stack(
+                    (np.zeros(n_samples), rng.normal(65, 6, n_samples)), axis=1
+                ),
+            },
+            tmp_path / "data.mat",
+        )
+
+    def test_canonical_mci_ad_file_is_named_by_the_official_table(self, tmp_path) -> None:
+        # canonical 1=MCI, 2=AD; the raw keys {1,2} read as official NC/MCI.
+        self._write_labels(tmp_path, [1, 2] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.class_labels == {0: "NC", 1: "MCI"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+    def test_explicit_names_resolve_the_ambiguity(self, tmp_path) -> None:
+        # The caller declares canonical 0=NC, 1=AD; with names present the
+        # raw-key tie-break never runs, and the binary view keeps both classes.
+        self._write_labels(tmp_path, [1, 2] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        named = replace(bundle, class_labels={0: "NC", 1: "AD"})
+        binary = named.task_view("binary")
+        assert binary.n_samples == 30
+        assert binary.label_map == {0: "NC", 1: "AD"}
+        assert binary.y.tolist() == [0, 1] * 15
