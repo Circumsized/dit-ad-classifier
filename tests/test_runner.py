@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from dit.data.schema import DatasetBundle
 from dit.data.synthetic import make_synthetic_bundle
 from dit.evaluation.runner import evaluate_classical, evaluate_metric_ensemble
 
@@ -53,3 +54,31 @@ def test_metric_ensemble_runner_emits_loso_fold_manifest() -> None:
         seed=13,
     )
     _assert_manifest(result.folds, strategy="loso")
+
+
+def test_loso_multiclass_fold_without_ad_has_no_binary_keys() -> None:
+    """A held-out site with no AD subject leaves NC/MCI: class 1 is MCI there."""
+
+    rng = np.random.default_rng(5)
+    n = 60
+    X = rng.normal(size=(n, 3, 5, 2)).astype(np.float32)
+    y = np.tile([0, 1, 2, 0, 1, 2, 0, 1, 2, 0], 6)
+    site = np.repeat(np.arange(6), 10)
+    y[50:] = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1]  # site 5: NC and MCI only
+    X = (X * 0.2 + np.array([-3.0, 0.0, 3.0])[y][:, None, None, None]).astype(np.float32)
+    bundle = DatasetBundle(X=X, y=y, site=site)
+    result = evaluate_classical(
+        bundle,
+        task="multiclass",
+        split_strategy="loso",
+        feature_view="summary",
+        n_splits=3,
+        inner_splits=3,
+        seed=1,
+    )
+    last = result.folds[-1]
+    assert last["held_out_site"] == "5"
+    assert last["test_class_counts"]["2"] == 0
+    assert last["fold_comparable"] is False
+    assert "sensitivity" not in last
+    assert "specificity" not in last

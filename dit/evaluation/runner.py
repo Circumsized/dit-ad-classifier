@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from dit.data.schema import DatasetBundle
+from dit.data.schema import DatasetBundle, is_binary_task
 from dit.data.splits import split_indices
 from dit.evaluation.metrics import classification_metrics
 from dit.evaluation.provenance import fold_provenance
@@ -62,7 +62,13 @@ def evaluate_classical(
     seed: int = 42,
     n_jobs: int = 1,
 ) -> EvaluationResult:
-    """Evaluate a classical model using out-of-fold probabilities."""
+    """Evaluate a classical model using out-of-fold probabilities.
+
+    Compatibility runner: the CLI and every production path use
+    ``run_experiment``, which also supports selection, residualization and
+    control views. This leaner path lacks the inner-fold class-support guard
+    ``run_experiment`` applies before its search, so prefer it for new code.
+    """
 
     view = dataset.task_view(task)
     if view.y is None:
@@ -118,7 +124,9 @@ def evaluate_classical(
         predictions = np.argmax(probabilities, axis=1)
         oof_prob[test_idx] = probabilities
         oof_pred[test_idx] = predictions
-        report = classification_metrics(view.y[test_idx], predictions, probabilities)
+        report = classification_metrics(
+            view.y[test_idx], predictions, probabilities, binary_view=is_binary_task(task)
+        )
         report.update(
             {
                 "fold": str(fold_id),
@@ -133,7 +141,9 @@ def evaluate_classical(
         fold_reports.append(report)
 
     _ensure_complete_oof(oof_pred, oof_prob)
-    aggregate = classification_metrics(view.y, oof_pred, oof_prob)
+    aggregate = classification_metrics(
+        view.y, oof_pred, oof_prob, binary_view=is_binary_task(task)
+    )
     return EvaluationResult(
         model=model_name,
         task=task,
@@ -158,7 +168,11 @@ def evaluate_metric_ensemble(
     seed: int = 42,
     n_jobs: int = 1,
 ) -> EvaluationResult:
-    """Soft-vote linear SVMs trained independently per diffusion metric."""
+    """Soft-vote linear SVMs trained independently per diffusion metric.
+
+    Compatibility runner: the CLI and every production path use
+    ``run_experiment`` with ``model="ensemble"``. Kept for external callers.
+    """
 
     view = dataset.task_view(task)
     if view.y is None:
@@ -214,7 +228,9 @@ def evaluate_metric_ensemble(
         predictions = np.argmax(probabilities, axis=1)
         oof_prob[test_idx] = probabilities
         oof_pred[test_idx] = predictions
-        report = classification_metrics(view.y[test_idx], predictions, probabilities)
+        report = classification_metrics(
+            view.y[test_idx], predictions, probabilities, binary_view=is_binary_task(task)
+        )
         report.update(
             {
                 "fold": str(fold_id),
@@ -228,7 +244,9 @@ def evaluate_metric_ensemble(
         fold_reports.append(report)
 
     _ensure_complete_oof(oof_pred, oof_prob)
-    aggregate = classification_metrics(view.y, oof_pred, oof_prob)
+    aggregate = classification_metrics(
+        view.y, oof_pred, oof_prob, binary_view=is_binary_task(task)
+    )
     return EvaluationResult(
         model="metric_ensemble_linear_svm",
         task=task,
