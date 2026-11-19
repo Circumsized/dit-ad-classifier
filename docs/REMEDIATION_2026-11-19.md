@@ -31,7 +31,8 @@
 | C9 | `10898af` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
 | R1 | `950b08a` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
 
-净结果：**525 → 647 passed**（含复审修复轮 R1 的 3 个回归测试），无既有断言被弱化（唯一删除是随死代码移除的
+净结果：**525 → 637 passed**（C12 移除 10 个仅服务于被删 API 的用例；生产路径
+测试净增 122 个），无既有断言被弱化（唯一删除是随死代码移除的
 `threshold_sweep` 专属测试，commit message 已声明）。
 
 ## 3. 每修复循环 SOP（本批实际执行）
@@ -57,9 +58,11 @@
 - **cingulum 区间**：代码 1–10 与 USAGE 40–60 矛盾且均无可核验来源；代码保持
   现状，USAGE 标注争议。取得可引用来源前，扣带回 `literature_hits` 命中结论
   不应单独作为证据。
-- **C12（待用户裁决）**：删除 `evaluate_classical`/`evaluate_metric_ensemble`
-  （~190 行，仅测试驱动）与 `TractFeaturePreprocessor` 公开导出（~70 行，全量统
-  计 API 有泄漏诱骗风险）。当前已加 docstring 警告；删除是独立 commit。
+- **C12（已执行，`dca888a`）**：删除了 `evaluate_classical`/
+  `evaluate_metric_ensemble`（~190 行，仅测试驱动、无 `_require_inner_class_support`
+  守卫）与 `TractFeaturePreprocessor` 公开导出及类（全量统计 API，泄漏诱骗器）；
+  `runner.py` 仅保留 `EvaluationResult` 契约。连带移除 9 个测试函数（10 个用例）
+  与 4 个失去调用方的导入。全量 637 passed。
 - **interpret permutation importance**：口径已改为如实声明 in-sample；若要样本
   外估计需让 `cmd_interpret` 用 OOF 预测驱动（较大改动，未做）。
 - **未动的 P3**：约 25 项（类型设计 TypedDict 化、`_choose_axis` 多轴匹配守卫、
