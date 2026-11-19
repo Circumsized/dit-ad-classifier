@@ -27,9 +27,8 @@ from dit.data.covariates import (
     COVARIATE_STRATEGIES,
     Residualizer,
     covariate_matrix,
-    strip_covariate_columns,
 )
-from dit.data.schema import DatasetBundle
+from dit.data.schema import DatasetBundle, is_binary_task
 from dit.data.preprocessing import smooth_profiles
 from dit.data.selection import SparseBlockSelector
 from dit.data.splits import split_indices
@@ -217,9 +216,6 @@ class ExperimentResult:
         # earlier reports.
         return f"{base}|{cfg.control_view}" if cfg.control_view else base
 
-    def to_fold_dicts(self) -> tuple[dict[str, object], ...]:
-        return self.folds
-
     def as_evaluation_result(self):
         """Adapt to the shape :mod:`dit.evaluation.runner` expects."""
 
@@ -293,27 +289,6 @@ def prepare_matrix(
         "model_layout": model_layout,
         "n_core_columns": layout.n_feature_columns,
     }
-
-
-def _apply_residualizer(
-    train: np.ndarray,
-    test: np.ndarray,
-    train_cov: np.ndarray,
-    test_cov: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, Residualizer]:
-    """Standalone residualization kept for direct callers and tests.
-
-    The experiment path no longer uses it: residualization there lives inside
-    the sklearn pipeline (see :func:`make_search_estimator`), which is what
-    keeps the regression fold-local under nested search.
-    """
-
-    fitted = Residualizer().fit(train, train_cov)
-    return (
-        fitted.transform(train, train_cov),
-        fitted.transform(test, test_cov),
-        fitted,
-    )
 
 
 def _require_inner_class_support(cv: Any, y_train: np.ndarray, groups: np.ndarray | None) -> None:
@@ -516,7 +491,12 @@ def run_experiment(
             oof_pred[test_idx] = np.argmax(probabilities, axis=1)
             fold_reports.append(
                 {
-                    **classification_metrics(view.y[test_idx], oof_pred[test_idx], probabilities),
+                    **classification_metrics(
+                view.y[test_idx],
+                oof_pred[test_idx],
+                probabilities,
+                binary_view=is_binary_task(config.task),
+            ),
                     "fold": str(fold_id),
                     "n_train": int(train_idx.size),
                     "n_test": int(test_idx.size),
@@ -582,7 +562,9 @@ def run_experiment(
         if fitted_selector is not None:
             n_features_used = int(fitted_selector.n_selected)
 
-        report = classification_metrics(view.y[test_idx], predictions, probabilities)
+        report = classification_metrics(
+            view.y[test_idx], predictions, probabilities, binary_view=is_binary_task(config.task)
+        )
         report.update(
             {
                 "fold": str(fold_id),
@@ -623,7 +605,9 @@ def run_experiment(
 
     # The outer-fold argmax is the performance estimate: each row came from a
     # model that did not train on it, before any rule observed its label.
-    oof_argmax_metrics = classification_metrics(view.y, oof_pred, oof_prob)
+    oof_argmax_metrics = classification_metrics(
+        view.y, oof_pred, oof_prob, binary_view=is_binary_task(config.task)
+    )
     aggregate = dict(oof_argmax_metrics)
     aggregate["threshold_criterion"] = config.threshold_criterion
     aggregate["threshold_evaluation"] = "outer_oof_argmax"
@@ -652,7 +636,12 @@ def run_experiment(
         oof_prob,
         criterion=config.threshold_criterion,
     )
-    thresholded_selection_metrics = classification_metrics(view.y, policy.predict(oof_prob), oof_prob)
+    thresholded_selection_metrics = classification_metrics(
+        view.y,
+        policy.predict(oof_prob),
+        oof_prob,
+        binary_view=is_binary_task(config.task),
+    )
     thresholded_selection_metrics["scope"] = "all_outer_oof_used_for_threshold_fit"
     thresholded_selection_metrics["not_for_performance_comparison"] = True
 
@@ -764,7 +753,10 @@ def run_ensemble(
         oof_prob[test_idx] = averaged
 
         average_report = classification_metrics(
-            view.y[test_idx], np.argmax(averaged, axis=1), averaged
+            view.y[test_idx],
+            np.argmax(averaged, axis=1),
+            averaged,
+            binary_view=is_binary_task(config.task),
         )
         provenance = fold_provenance(
             test_idx,
@@ -808,7 +800,9 @@ def run_ensemble(
         raise RuntimeError(f"ensemble did not predict every subject: {missing[:10]}")
 
     oof_argmax = np.argmax(oof_prob, axis=1)
-    oof_argmax_metrics = classification_metrics(view.y, oof_argmax, oof_prob)
+    oof_argmax_metrics = classification_metrics(
+        view.y, oof_argmax, oof_prob, binary_view=is_binary_task(config.task)
+    )
     aggregate = dict(oof_argmax_metrics)
     aggregate["threshold_criterion"] = config.threshold_criterion
     aggregate["threshold_evaluation"] = "outer_oof_argmax"
@@ -829,7 +823,12 @@ def run_ensemble(
     # This policy is fit for future deployment only.  It is not used for the
     # outer-CV score because the full OOF labels selected it.
     policy = fit_threshold(view.y, oof_prob, criterion=config.threshold_criterion)
-    thresholded_selection_metrics = classification_metrics(view.y, policy.predict(oof_prob), oof_prob)
+    thresholded_selection_metrics = classification_metrics(
+        view.y,
+        policy.predict(oof_prob),
+        oof_prob,
+        binary_view=is_binary_task(config.task),
+    )
     thresholded_selection_metrics["scope"] = "all_outer_oof_used_for_threshold_fit"
     thresholded_selection_metrics["not_for_performance_comparison"] = True
 

@@ -68,6 +68,18 @@ def raw_label_names(raw_label_map: Mapping[int, int]) -> dict[int, str]:
     }
 
 
+# Task aliases DatasetBundle.task_view accepts for the two-class view.  The
+# binary family renumbers NC/AD to 0/1, which is the only situation where
+# "sensitivity"/"specificity" name a disease role rather than a class position.
+BINARY_TASK_ALIASES = frozenset({"binary", "ad_nc", "ad_vs_nc"})
+
+
+def is_binary_task(task: str) -> bool:
+    """True when ``task`` names the two-class NC-vs-AD view."""
+
+    return str(task).lower().replace("-", "_") in BINARY_TASK_ALIASES
+
+
 @dataclass(frozen=True)
 class DatasetBundle:
     """Validated AFQ dataset.
@@ -231,7 +243,7 @@ class DatasetBundle:
         normalized = task.lower().replace("-", "_")
         if normalized in {"multiclass", "three_class", "3class", "all"}:
             return self
-        if normalized not in {"binary", "ad_nc", "ad_vs_nc"}:
+        if normalized not in BINARY_TASK_ALIASES:
             raise ValueError("task must be binary/ad_nc or multiclass")
 
         reference = self._label_for("NC")
