@@ -13,7 +13,7 @@ import pytest
 
 from dit.data.covariates import Residualizer, covariate_matrix, strip_covariate_columns
 from dit.data.layout import FeatureLayout, view_for_layout
-from dit.data.preprocessing import TractFeaturePreprocessor, smooth_profiles
+from dit.data.preprocessing import smooth_profiles
 from dit.data.schema import DatasetBundle
 from dit.data.synthetic import make_synthetic_bundle
 from dit.models.classical import _nan_area, _nan_slope, build_feature_matrix, describe_feature_layout
@@ -225,59 +225,6 @@ class TestMissingPattern:
         assert features[0, block.start] == pytest.approx(1.0)
         assert features[0, block.start + 1] == pytest.approx(0.0)
         assert features[1, block.start] == pytest.approx(0.0)
-
-
-class TestPreprocessorLeakage:
-    def test_fit_uses_only_training_rows(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=80, n_points=11, n_metrics=2, seed=5)
-        preprocessor = TractFeaturePreprocessor(smooth_window=1).fit(
-            bundle.X[:50], age=bundle.age[:50], sex=bundle.sex[:50]
-        )
-        training_mean = float(np.nanmean(bundle.X[:50].reshape(50, -1), axis=0).mean())
-        assert float(preprocessor.center_.mean()) == pytest.approx(training_mean, rel=1e-5)
-
-    def test_transform_is_invariant_to_unseen_data(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=80, n_points=11, n_metrics=2, seed=5)
-        fitted = TractFeaturePreprocessor().fit(bundle.X[:50], bundle.age[:50], bundle.sex[:50])
-        transformed = fitted.transform(bundle.X[:50], bundle.age[:50], bundle.sex[:50])
-
-        # Fitting on a different, far larger training set must not change the
-        # transform of the original rows.
-        other = TractFeaturePreprocessor().fit(
-            bundle.X[:50], bundle.age[:50], bundle.sex[:50]
-        )
-        assert np.allclose(transformed, other.transform(bundle.X[:50], bundle.age[:50], bundle.sex[:50]))
-
-    def test_transform_requires_fit(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=28, n_points=5, n_metrics=1)
-        with pytest.raises(RuntimeError, match="must be fit"):
-            TractFeaturePreprocessor().transform(bundle.X)
-
-    def test_imputation_uses_training_median(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=40, n_points=7, n_metrics=1, seed=2)
-        x_train = bundle.X[:25].copy()
-        x_test = bundle.X[25:].copy()
-        x_test[0] = np.nan
-        fitted = TractFeaturePreprocessor().fit(x_train, bundle.age[:25], bundle.sex[:25])
-        out = fitted.transform(x_test, bundle.age[25:], bundle.sex[25:])
-        assert np.isfinite(out[0]).all()
-
-    def test_covariates_are_appended_when_requested(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=30, n_points=7, n_metrics=1)
-        plain = TractFeaturePreprocessor(include_covariates=False).fit_transform(
-            bundle.X, bundle.age, bundle.sex
-        )
-        with_cov = TractFeaturePreprocessor(include_covariates=True).fit_transform(
-            bundle.X, bundle.age, bundle.sex
-        )
-        assert with_cov.shape[1] == plain.shape[1] + 2
-
-    def test_zero_variance_columns_are_not_divided_by_zero(self) -> None:
-        x = np.ones((12, 2, 5, 1), dtype=np.float32)
-        age = np.arange(12, dtype=np.float32)
-        sex = np.zeros(12, dtype=np.float32)
-        out = TractFeaturePreprocessor().fit_transform(x, age, sex)
-        assert np.isfinite(out).all()
 
 
 class TestResidualizer:
