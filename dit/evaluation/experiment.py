@@ -173,11 +173,11 @@ class ExperimentConfig:
             )
 
     def describe(self) -> dict[str, object]:
-        return {
-            key: value
-            for key, value in sorted(self.__dict__.items())
-            if value is not None and value != () and value != [] and value != tuple()
-        }
+        # Every field, including explicit None: describe() feeds both the
+        # report's configuration section and the deployment artifact's config
+        # snapshot, and dropping None made a reloaded artifact restore
+        # dataclass defaults (an explicit max_features=None came back as 300).
+        return dict(sorted(self.__dict__.items()))
 
     @property
     def covariates_as_features(self) -> bool:
