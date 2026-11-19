@@ -349,6 +349,27 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="incompatible"):
             load_deployment_artifact(target)
 
+    def test_artifact_config_roundtrip_keeps_explicit_none(self, tmp_path) -> None:
+        from dit.deployment import (
+            fit_deployment_model,
+            load_deployment_artifact,
+            save_deployment_artifact,
+        )
+
+        # describe() used to drop the explicit None, so the reloaded artifact
+        # came back with max_features=300 -- a config that no longer matched
+        # the run that produced it.
+        config = ExperimentConfig(
+            model="linear_svm", n_splits=2, inner_splits=2, seed=1, max_features=None
+        )
+        assert config.describe()["max_features"] is None
+        model = fit_deployment_model(_bundle(seed=41, n=80), config)
+        loaded = load_deployment_artifact(
+            save_deployment_artifact(model, tmp_path / "model.joblib")
+        )
+        assert loaded.config == config
+        assert loaded.config.max_features is None
+
     def test_load_refuses_a_missing_sidecar(self, tmp_path) -> None:
         from dit.deployment import load_deployment_artifact, save_deployment_artifact
 
