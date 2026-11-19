@@ -57,3 +57,22 @@ def test_binary_task_aliases_are_recognised(alias) -> None:
     assert is_binary_task(alias)
     assert not is_binary_task("multiclass")
     assert not is_binary_task("three_class")
+
+
+def test_binary_view_single_class_fold_emits_no_disease_keys() -> None:
+    """A fold whose labels are single-class must not publish NaN conventions.
+
+    ``classes`` unions y_true and y_pred, so a single-class fold whose
+    predictions spill into a second class used to take the two-class branch
+    and report NaN sensitivity/auc_disease (rescued only downstream by
+    _json_safe).  The gate is on the labels present in y_true.
+    """
+
+    y = np.zeros(5, dtype=int)
+    pred = np.array([0, 0, 1, 0, 0])
+    probabilities = np.array([[0.9, 0.1]] * 4 + [[0.2, 0.8]])
+    result = classification_metrics(y, pred, probabilities, binary_view=True)
+    assert "sensitivity" not in result
+    assert "specificity" not in result
+    assert "auc_disease" not in result
+    assert result["class_recall"]["0"] == pytest.approx(0.8)

@@ -366,7 +366,7 @@ dit.cli 命令行工具箱:
 ├── predict    载入工件执行未标记队列推理，强制校验 SHA-256 签名与特征列契约
 ├── ablation   执行协变量策略 (none / feature / residualize) 与特征视图全景消融
 ├── matrix     自动化批处理执行 2 任务 (binary/multiclass) × 2 策略基准矩阵
-├── interpret  全量重拟合模型，导出神经解剖节点贡献度热力图与文献比对
+├── interpret  全量重拟合模型，导出神经解剖节点贡献度热力图与文献比对（不支持 --select / --covariate residualize / --control-view）
 ├── fetch      具备安全白名单、防 SSRF 重定向校验与 Socket 钉扎的数据下载器
 └── info       打印当前硬件指纹、Python 运行时、包版本与平台信息
 ```

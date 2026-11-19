@@ -42,6 +42,11 @@ def _safe_filename_component(name: str) -> str:
     ``..`` all disappear, and stripping ``._`` afterwards removes hidden-file
     and parent-directory spellings.  An all-metacharacter name falls back to
     a stable placeholder rather than an empty stem.
+
+    The cleaned stem is a filename, not an identifier: it may differ from the
+    metric name (leading ``_`` stripped, non-ASCII replaced), so the only
+    human-readable mapping back is the figure title, which keeps the
+    original name.
     """
 
     cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(name)).strip("._")
@@ -156,10 +161,17 @@ def render_metric_panel(
         title = f"{title_prefix} - {layout.metric_names[metric]}"
         # Metric names are .mat struct field names, i.e. arbitrary strings:
         # they reach the filesystem here, so reduce each to one safe
-        # component before it becomes part of a path.
-        name = _safe_filename_component(layout.metric_names[metric])
-        if name in used_names:
-            name = f"{name}_{metric}"
+        # component before it becomes part of a path.  Cleaning can map two
+        # different names onto one stem ("_A" and "A"), and a disambiguated
+        # stem can collide with a third name's natural stem ("A" vs "A_2"),
+        # so keep extending until the name is unused rather than assuming one
+        # suffix is enough.
+        base = _safe_filename_component(layout.metric_names[metric])
+        name = base
+        attempt = 1
+        while name in used_names:
+            name = f"{base}_{metric}" if attempt == 1 else f"{base}_{metric}_{attempt}"
+            attempt += 1
         used_names.add(name)
         target = render_node_heatmap(
             matrix,

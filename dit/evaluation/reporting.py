@@ -364,6 +364,10 @@ def write_markdown(path: str | Path, payload: dict[str, object]) -> Path:
 # JSON blocks need no equivalent: they are fenced and dumps-escaped.
 _MD_CELL_ESCAPES = str.maketrans(
     {
+        # The backslash first: it is the escape character itself, and leaving
+        # it raw lets a renderer that parses \\ before \| read the escaped
+        # pipe back as a structural one.
+        "\\": "\\\\",
         "|": r"\|",
         "`": r"\`",
         "<": "&lt;",

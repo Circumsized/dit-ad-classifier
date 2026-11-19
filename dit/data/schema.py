@@ -189,26 +189,28 @@ class DatasetBundle:
     def class_names(self) -> tuple[str, ...]:
         if self.y is None:
             return tuple()
-        names: list[str] = []
-        for label in sorted(np.unique(self.y).tolist()):
-            label = int(label)
-            if self.class_labels and label in self.class_labels:
-                names.append(str(self.class_labels[label]))
-            else:
-                names.append(CANONICAL_NAMES.get(label, str(label)))
-        return tuple(names)
+        return tuple(self.label_map[int(label)] for label in sorted(np.unique(self.y).tolist()))
 
     @property
     def label_map(self) -> dict[int, str]:
-        """Canonical label to display name, for every present class."""
+        """Canonical label to display name, for every present class.
+
+        Resolution order matches ``_label_for``: the bundle's own
+        ``class_labels``, then the coding its source file used
+        (:func:`raw_label_names`), and only for a completely unnamed bundle
+        the canonical default table.
+        """
 
         result: dict[int, str] = {}
         if self.y is None:
             return result
+        derived = raw_label_names(self.raw_label_map)
         for label in sorted(np.unique(self.y).tolist()):
             label = int(label)
             if self.class_labels and label in self.class_labels:
                 result[label] = str(self.class_labels[label])
+            elif label in derived:
+                result[label] = derived[label]
             else:
                 result[label] = CANONICAL_NAMES.get(label, str(label))
         return result
@@ -269,9 +271,9 @@ class DatasetBundle:
 
         Only labels present in ``y`` resolve, so a name backed by no subject
         cannot fabricate a class. The canonical table is a default for
-        unnamed bundles only: once ``class_labels`` or ``raw_label_map`` name
-        the classes they are authoritative, and a missing name means the
-        class is absent rather than misnamed.
+        unnamed bundles only: ``class_labels`` is consulted first, then the
+        coding the source file used, and a missing name means the class is
+        absent rather than misnamed.
         """
 
         present = {int(label) for label in np.unique(self.y)} if self.y is not None else set()
