@@ -303,12 +303,12 @@ def _csv_safe(value: object) -> str:
     """Neutralise spreadsheet formula injection in a data-controlled cell.
 
     Subject identifiers come from the data file and land in the first CSV
-    column; a leading ``=``, ``+``, ``-``, ``@``, tab or CR would otherwise be
-    evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
+    column; a leading ``=``, ``+``, ``-``, ``@``, tab, CR or LF would otherwise
+    be evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
     """
 
     text = str(value)
-    return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r"} else text
+    return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r", "\n"} else text
 
 
 def _write_rad_scores(
@@ -340,7 +340,7 @@ def _write_rad_scores(
     target.parent.mkdir(parents=True, exist_ok=True)
     columns = (
         ["subject_id", "true_label", "predicted_label", "disease_score"]
-        + [f"p_{name_of[c]}" for c in class_labels]
+        + [f"p_{_csv_safe(name_of[c])}" for c in class_labels]
     )
     with target.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -348,8 +348,8 @@ def _write_rad_scores(
         for index in range(view.n_samples):
             row = [
                 _csv_safe(subject_ids[index]),
-                name_of[int(labels[index])],
-                name_of[int(predictions[index])],
+                _csv_safe(name_of[int(labels[index])]),
+                _csv_safe(name_of[int(predictions[index])]),
                 f"{float(probabilities[index, disease]):.6f}",
             ]
             row += [f"{float(probabilities[index, c]):.6f}" for c in class_labels]
@@ -540,6 +540,13 @@ def cmd_interpret(args: argparse.Namespace) -> int:
             "control views are evaluation inputs, and the interpretation path "
             "explains one fitted model. Run evaluate with the control view."
         )
+    if config.alignment != "none":
+        raise ValueError(
+            f"interpret does not support --alignment {config.alignment!r}: the "
+            "alignment loss is a training-time term of the profile Transformer, "
+            "and the interpretation path fits one classical model on every "
+            "labeled row. Run evaluate with a Transformer model."
+        )
     view = dataset.task_view(config.task)
     if view.y is None:
         raise SystemExit("interpretation requires labels")
@@ -587,10 +594,15 @@ def cmd_interpret(args: argparse.Namespace) -> int:
         "literature_hits": literature_hits(coefficients, layout),
         "environment": environment_fingerprint(config.seed),
     }
-    heatmaps: list[Path] = []
+    heatmaps: list[tuple[int, Path]] = []
     if layout.kind in {"profile", "metric"}:
         heatmaps = render_metric_panel(coefficients, layout, out_dir=out_dir / "heatmaps")
-        payload["heatmaps"] = [str(path) for path in heatmaps]
+        # Paired with the original metric name: the filename is a sanitised
+        # stem, so the path alone cannot say which metric it came from.
+        payload["heatmaps"] = [
+            {"metric": layout.metric_names[metric], "path": str(path)}
+            for metric, path in heatmaps
+        ]
     # One write, after the heatmap key exists: writing twice serialised the
     # whole payload a second time for no gain.
     written = [write_json(out_dir / "interpret.json", payload), *heatmaps]
@@ -654,14 +666,14 @@ def cmd_predict(args: argparse.Namespace) -> int:
         writer = csv.writer(handle)
         writer.writerow(
             ["subject_id", "predicted_label", "predicted_class"]
-            + [f"p_{name}" for name in class_names]
+            + [f"p_{_csv_safe(name)}" for name in class_names]
         )
         for index in range(dataset.n_samples):
             writer.writerow(
                 [
                     _csv_safe(subject_ids[index]),
                     int(predictions[index]),
-                    outcome["predicted_names"][index],
+                    _csv_safe(outcome["predicted_names"][index]),
                     *[float(probabilities[index, column]) for column in range(len(class_names))],
                 ]
             )

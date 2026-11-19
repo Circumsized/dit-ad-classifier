@@ -403,3 +403,36 @@ def test_rad_scores_csv_prefixes_a_hostile_subject_id(tmp_path) -> None:
     assert rows[0][0] == "subject_id"
     assert rows[1][0] == "'=cmd|' /C calc'!A0"
     assert "'+2" in {row[0] for row in rows[1:]}
+
+
+def test_rad_scores_csv_neutralises_hostile_class_names(tmp_path) -> None:
+    import csv
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _write_rad_scores
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig
+
+    # Class names come from the data file's coding and reach the CSV header
+    # and label columns; only subject_id used to be neutralised.
+    bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=6)
+    bundle = replace(
+        bundle,
+        class_labels={0: "=cmd|'/c calc'!A0", 1: "+1", 2: "-2"},
+    )
+    view = bundle.task_view("multiclass")
+    probabilities = np.tile([0.2, 0.3, 0.5], (view.n_samples, 1))
+    result = SimpleNamespace(
+        probabilities=probabilities, predictions=probabilities.argmax(axis=1)
+    )
+    path = _write_rad_scores(tmp_path, bundle, ExperimentConfig(task="multiclass"), result)
+    with path.open(encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    header = rows[0]
+    assert all(not cell.startswith(("=", "+", "-")) for cell in header), header
+    for row in rows[1:]:
+        assert not row[1].startswith(("=", "+", "-")), row
+        assert not row[2].startswith(("=", "+", "-")), row
+    assert header[-1] == "p_'-2"
