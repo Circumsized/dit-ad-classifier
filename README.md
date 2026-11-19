@@ -177,7 +177,7 @@ $$Z = [\mathbf{1}, \text{age}, \text{sex}] \in \mathbb{R}^{N \times 3}$$
 | 计算训练集统计量:                       |        | 状态: 完全冻结锁定             |
 |  - 中位数向量: med(X_train)             |        |                                |
 |  - 均值与方差: μ_train, σ_train         |        | 待命等待前向推理               |
-|  - ANOVA F 检验选择 Top-K 特征          |        |                                |
+|  - L1 弹性网系数幅值选择 Top-K 特征      |        |                                |
 |  - 求解 OLS 残差化系数 W                |        |                                |
 +--------------------+--------------------+        +----------------+---------------+
                      |                                              |
@@ -420,7 +420,7 @@ DIT-/
 │   │   ├── mat_loader.py        MATLAB 矩阵解析与标量校验
 │   │   ├── preprocessing.py     折内中位数插补与空间高斯平滑滤波
 │   │   ├── schema.py            核心张量契约 DatasetBundle 约束定义
-│   │   ├── selection.py         嵌套 ANOVA 解剖块级与节点级特征筛选
+│   │   ├── selection.py         折内 L1 弹性网解剖块级与节点级特征筛选
 │   │   ├── splits.py            分层 K 折、站点分层与 LOSO 确定性分割
 │   │   └── synthetic.py         确定性伪随机合成医学影像数据引擎
 │   ├── evaluation/
