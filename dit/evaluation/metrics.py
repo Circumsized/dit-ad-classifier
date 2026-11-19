@@ -22,6 +22,8 @@ def confusion_matrix(y_true, y_pred, labels=None) -> np.ndarray:
 def expected_calibration_error(y_true, probabilities, n_bins: int = 10) -> float:
     """Compute confidence-based expected calibration error."""
 
+    if n_bins < 1:
+        raise ValueError("n_bins must be >= 1")
     true = np.asarray(y_true, dtype=int).reshape(-1)
     prob = _as_probability_matrix(probabilities)
     if prob.shape[0] != true.shape[0]:

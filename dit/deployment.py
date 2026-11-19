@@ -190,6 +190,18 @@ def _digest_path(path: Path) -> Path:
     return path.with_name(path.name + ".sha256")
 
 
+def _section(payload_dict: dict, key: str, source: Path):
+    """Fetch one required artifact section as a ValueError, never a KeyError."""
+
+    try:
+        return payload_dict[key]
+    except KeyError as exc:
+        raise ValueError(
+            f"{source} has no {key!r} section; it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        ) from exc
+
+
 def save_deployment_artifact(model: DeploymentModel, path: str | Path) -> Path:
     """Pickle the deployment bundle to ``path`` (parent directories created).
 
@@ -252,28 +264,28 @@ def load_deployment_artifact(path: str | Path) -> DeploymentModel:
     payload_dict = _ArtifactUnpickler(io.BytesIO(payload)).load()
     if not isinstance(payload_dict, dict) or payload_dict.get("artifact_version") != ARTIFACT_VERSION:
         raise ValueError(f"{source} is not a version-{ARTIFACT_VERSION} deployment artifact")
-    # A missing or renamed config section is a corrupt/incompatible artifact,
-    # not a crash: the CLI contract (cli/main.py) only catches ValueError.
+    # Every required section surfaces as a ValueError, because the CLI
+    # contract (cli/main.py) only catches ValueError: a truncated or
+    # foreign artifact must print one actionable line, not a KeyError
+    # traceback.
+    config_values = _section(payload_dict, "config", source)
     try:
-        config_values = dict(payload_dict["config"])
-        config = ExperimentConfig(**config_values)
-    except KeyError as exc:
-        raise ValueError(
-            f"{source} has no config section; it is not a complete "
-            f"version-{ARTIFACT_VERSION} deployment artifact"
-        ) from exc
+        config = ExperimentConfig(**dict(config_values))
     except TypeError as exc:
         raise ValueError(
             f"deployment artifact config is incompatible with this version: {exc}"
         ) from exc
     return DeploymentModel(
-        pipeline=payload_dict["pipeline"],
+        pipeline=_section(payload_dict, "pipeline", source),
         config=config,
-        label_map={int(key): str(value) for key, value in payload_dict["label_map"].items()},
-        feature_names=tuple(payload_dict["feature_names"]),
-        data_digest=str(payload_dict["data_digest"]),
-        best_params=dict(payload_dict["best_params"]),
-        classes_=np.asarray(payload_dict["classes"], dtype=int),
+        label_map={
+            int(key): str(value)
+            for key, value in _section(payload_dict, "label_map", source).items()
+        },
+        feature_names=tuple(_section(payload_dict, "feature_names", source)),
+        data_digest=str(_section(payload_dict, "data_digest", source)),
+        best_params=dict(_section(payload_dict, "best_params", source)),
+        classes_=np.asarray(_section(payload_dict, "classes", source), dtype=int),
     )
 
 
@@ -313,7 +325,11 @@ def predict_unlabeled(
             "deployment model produced rows whose probabilities do not sum to 1 "
             f"(min {float(totals.min()):.6f}, max {float(totals.max()):.6f})"
         )
-    predictions = np.argmax(probabilities, axis=1)
+    # predict_proba columns follow the fitted classes_, which is not
+    # necessarily 0..n-1: a multiclass fit whose training rows miss the middle
+    # class has classes_=[0, 2], and argmax alone would report column 1 as
+    # label 1 -- a class no subject belongs to.
+    predictions = np.asarray(model.classes_, dtype=int)[np.argmax(probabilities, axis=1)]
     named = [model.label_map.get(int(label), str(int(label))) for label in predictions]
     return {
         "probabilities": probabilities,

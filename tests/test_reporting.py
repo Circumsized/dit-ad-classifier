@@ -325,3 +325,55 @@ def test_paired_comparison_table_escapes_reference_and_candidate() -> None:
     # 8 columns -> exactly 9 structural pipes (escaped \| do not split).
     assert row.replace("\|", "").count("|") == 9
     assert r"mod\|el" in row and "cand&lt;y&gt;" in row
+
+
+def test_evaluation_result_to_dict_round_trips_without_torch() -> None:
+    # to_dict had its only coverage inside a torch-gated test; the core CI
+    # job never exercised it.
+    from dit.evaluation.runner import EvaluationResult
+    from dit.evaluation.threshold import ThresholdPolicy
+
+    result = EvaluationResult(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={"accuracy": 0.5},
+        folds=({"fold": "0", "accuracy": 0.5},),
+        predictions=np.asarray([0, 1]),
+        probabilities=np.asarray([[0.6, 0.4], [0.3, 0.7]]),
+        threshold=ThresholdPolicy((0.5, 0.5), (0, 1), "f1", 0.5),
+        thresholded_selection_metrics={"scope": "x"},
+    )
+    payload = result.to_dict()
+    assert payload["model"] == "linear_svm"
+    assert payload["predictions"] == [0, 1]
+    assert payload["threshold"]["criterion"] == "f1"
+    assert payload["thresholded_selection_metrics"] == {"scope": "x"}
+    json.dumps(payload, allow_nan=False)
+
+
+def test_paired_comparison_caveats_cannot_forge_markdown_structure() -> None:
+    # Caveats and reasons reach the report through this public API; an
+    # unescaped newline would forge headings and tables in the Markdown.
+    comparison = {
+        "reference": "a",
+        "candidate": "b",
+        "metric": "balanced_accuracy",
+        "n_pairs": 5,
+        "mean_delta": 0.01,
+        "p_value": 0.5,
+        "p_value_holm": 0.5,
+        "status": "tested",
+        "caveats": ["ok\r\n\r\n# Injected heading\n\n| fake | table |\n|---|---|\n| a | b |"],
+    }
+    payload = assemble_report(
+        [], dataset_summary={}, configuration={}, paired_comparisons=[comparison]
+    )
+    lines = render_markdown(payload).splitlines()
+    # The caveat stays inside its blockquote line; no forged heading or table
+    # row starts a new structural line.
+    assert not any(line.startswith("# Injected") for line in lines)
+    assert not any(line.startswith("| fake") for line in lines)
+    caveat_line = next(line for line in lines if line.startswith("> ") and "Injected" in line)
+    assert "\n" not in caveat_line

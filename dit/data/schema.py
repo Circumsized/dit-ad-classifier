@@ -57,6 +57,12 @@ def raw_label_names(raw_label_map: Mapping[int, int]) -> dict[int, str]:
     already-canonical files code 0/1/2. Naming a canonical file with the
     official table shifts every class by one, so a 0/1/2 file would lose its
     AD class and report two classes called NC.
+
+    The raw-key test cannot separate a canonical {1, 2} file (MCI+AD) from an
+    official {1, 2} file (NC+MCI); official wins, matching the AI4AD
+    convention. A canonical two-class file without NC is therefore named
+    NC/MCI unless the caller passes explicit ``class_labels`` -- a binary view
+    still fails loudly, but a multiclass report would carry the shifted names.
     """
 
     official = set(raw_label_map) <= {1, 2, 3}

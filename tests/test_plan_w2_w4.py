@@ -331,6 +331,24 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="config"):
             load_deployment_artifact(target)
 
+    def test_load_refuses_an_artifact_missing_a_required_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # A truncated artifact must surface as a ValueError for every section,
+        # not just config: the CLI only catches ValueError.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "config": {"model": "linear_svm"}}
+        )
+        target = tmp_path / "truncated.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="'pipeline' section"):
+            load_deployment_artifact(target)
+
     def test_load_refuses_an_incompatible_config_section(self, tmp_path) -> None:
         import hashlib
         import pickle as pickle_module
@@ -506,3 +524,34 @@ class TestDeploymentClosure:
         lines = predictions_csv.read_text(encoding="utf-8").splitlines()
         assert lines[0].startswith("subject_id,predicted_label,predicted_class,p_")
         assert len(lines) == 81  # header + 80 subjects
+
+    def test_predict_maps_columns_through_the_fitted_classes(self, tmp_path) -> None:
+        # A multiclass fit whose rows miss the middle class has classes_=[0,2];
+        # argmax alone would report column 1 as label 1, a class no subject
+        # belongs to (silently mislabelled submission rows).
+        from dit.deployment import (
+            fit_deployment_model,
+            load_deployment_artifact,
+            predict_unlabeled,
+            save_deployment_artifact,
+        )
+        from dit.data.schema import DatasetBundle
+        from dit.data.synthetic import make_synthetic_bundle
+
+        bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=9)
+        view = bundle.task_view("multiclass")
+        keep = np.isin(view.y, [0, 2])
+        subset = DatasetBundle(
+            X=view.X[keep], y=view.y[keep], age=view.age[keep], sex=view.sex[keep],
+            site=view.site[keep], tract_names=view.tract_names,
+            metric_names=view.metric_names, raw_label_map=view.raw_label_map,
+            class_labels=view.class_labels,
+        )
+        config = ExperimentConfig(
+            model="linear_svm", task="multiclass", n_splits=2, inner_splits=2, seed=1
+        )
+        model = fit_deployment_model(subset, config)
+        assert model.classes_.tolist() == [0, 2]
+        outcome = predict_unlabeled(subset, model)
+        assert set(np.unique(outcome["predictions"]).tolist()) <= {0, 2}
+        assert all(name in {"NC", "AD"} for name in outcome["predicted_names"])
