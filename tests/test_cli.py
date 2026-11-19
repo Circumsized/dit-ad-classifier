@@ -342,3 +342,28 @@ def test_ablation_writes_csv_and_strict_json(tmp_path) -> None:
     # The table JSON must be valid strict JSON (no bare NaN).
     table = json.loads((tmp_path / "ablation_table.json").read_text(encoding="utf-8"))
     assert len(table) == 3
+
+
+def test_missing_site_metadata_is_stated_not_silently_skipped() -> None:
+    # A MAT file without the site key becomes all-(-1). The site section must
+    # then carry a note saying the analysis was skipped, instead of vanishing
+    # from the report without a trace.
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _bundle
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig, run_experiment
+
+    bundle = make_synthetic_bundle(n_samples=40, n_sites=3, n_classes=3, seed=7)
+    result = run_experiment(
+        bundle,
+        ExperimentConfig(task="multiclass", n_splits=2, inner_splits=2, seed=7),
+    )
+    missing = replace(bundle, site=np.full(bundle.n_samples, -1, dtype=np.int64))
+    report = _bundle([result], missing, {"seed": 7})
+    assert report["site_composition"]["note"] == (
+        "site analysis skipped: site metadata contains missing (-1) values"
+    )
+    assert "per_site" not in report

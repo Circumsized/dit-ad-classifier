@@ -244,6 +244,12 @@ def _bundle(
             }
         except ValueError as exc:
             composition = {"note": f"site metadata is incomplete: {exc}"}
+    elif view.site is not None and view.y is not None:
+        # Skipping silently would hide that the report has no site analysis at
+        # all, which is exactly how a missing site key in the MAT file looks.
+        composition = {
+            "note": "site analysis skipped: site metadata contains missing (-1) values"
+        }
     return assemble_report(
         evaluations,
         dataset_summary=dataset.summary(),
