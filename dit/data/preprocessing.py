@@ -8,8 +8,12 @@ import numpy as np
 def smooth_profiles(X: np.ndarray, window: int = 1) -> np.ndarray:
     """Average along the point axis while preserving shape.
 
-    NaNs are ignored.  A window of one is a no-op.  The operation is applied
-    before flattening and must therefore be fit/applied inside each split.
+    NaNs are ignored.  A window of one is a no-op.  The operation is strictly
+    row-local -- each subject's profile is averaged along its own point axis
+    with edge padding, and no statistic crosses subjects -- so applying it
+    before the split cannot leak.  It must not be confused with the fold-fitted
+    transforms (imputation, scaling), which is why it is safe to run once on
+    the whole view.
     """
 
     values = np.asarray(X, dtype=np.float32)
@@ -29,7 +33,6 @@ def smooth_profiles(X: np.ndarray, window: int = 1) -> np.ndarray:
     padded = np.pad(values, ((0, 0), (0, 0), (radius, radius), (0, 0)), mode="edge")
     finite = np.isfinite(padded)
     safe = np.where(finite, padded, 0.0)
-    kernel = np.ones(window, dtype=np.float32)
     sums = np.zeros_like(values, dtype=np.float32)
     counts = np.zeros_like(values, dtype=np.float32)
     for offset in range(window):

@@ -19,7 +19,12 @@ All three strategies are reported because their gap is a dataset result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation-only: the runtime import stays behind the torch gate in
+    # _load_deep_modules.
+    from dit.models.domain_train import DomainTrainConfig
 
 import numpy as np
 
@@ -153,6 +158,19 @@ class ExperimentConfig:
                 raise ValueError(
                     f"{name} must be an integer, got {type(value).__name__}"
                 )
+        # The string fields are consumed with .lower()/.upper() downstream: a
+        # YAML number here would surface as a distant AttributeError instead
+        # of this config error.
+        for name in ("model", "task", "split_strategy", "feature_view", "device"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string, got {type(value).__name__}")
+        # Bool fields silently truthify a string ("no" would enable
+        # determinism and the report would claim the opposite of the config).
+        for name in ("deep_deterministic", "include_missing_pattern"):
+            value = getattr(self, name)
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean, got {type(value).__name__}")
         for name in ("top_blocks", "max_features"):
             value = getattr(self, name)
             if value is not None and (
@@ -161,8 +179,12 @@ class ExperimentConfig:
                 raise ValueError(
                     f"{name} must be an integer or null, got {type(value).__name__}"
                 )
+            # Zero or negative would be silently clamped by the selector
+            # (max(1, ...) / the argmax fallback), contradicting the config.
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
         if isinstance(self.keep_fraction, bool) or not isinstance(
-            self.keep_fraction, (int, float, np.floating)
+            self.keep_fraction, (int, float, np.integer, np.floating)
         ):
             raise ValueError(
                 f"keep_fraction must be a number, got {type(self.keep_fraction).__name__}"
@@ -176,6 +198,11 @@ class ExperimentConfig:
                 "ensemble_models must be a sequence of model names, not "
                 f"{type(self.ensemble_models).__name__}"
             )
+        for member in self.ensemble_models:
+            if not isinstance(member, str):
+                raise ValueError(
+                    f"ensemble_models entries must be strings, got {member!r}"
+                )
         # Normalise to a tuple so a config that crossed JSON/YAML (list) still
         # round-trips equal to the in-memory one.
         object.__setattr__(self, "ensemble_models", tuple(self.ensemble_models))
@@ -184,7 +211,9 @@ class ExperimentConfig:
                 f"unknown covariate_strategy {self.covariate_strategy!r}; "
                 f"use {COVARIATE_STRATEGIES}"
             )
-        if self.threshold_criterion not in {"f1", "balanced", "fixed"}:
+        # A tuple, not a set: a YAML list here would raise TypeError on the
+        # set's hash probe instead of this config error.
+        if self.threshold_criterion not in ("f1", "balanced", "fixed"):
             raise ValueError(f"unknown threshold_criterion {self.threshold_criterion!r}")
         if self.n_splits < 2:
             raise ValueError("n_splits must be >= 2")
@@ -333,6 +362,9 @@ def prepare_matrix(
     return features, covariates, {
         "layout": layout,
         "model_layout": model_layout,
+        # Always present, None when there is no control view, so consumers
+        # can use one .get shape instead of two dict shapes.
+        "control_names": None,
         "n_core_columns": layout.n_feature_columns,
     }
 
@@ -706,21 +738,23 @@ def run_experiment(
     )
 
 
-def _fold_weights(scores: list[float], weighting: str) -> np.ndarray:
-    """Normalised per-fold weights for soft voting.
+def _fold_weights(scores: list[float], weighting: str) -> tuple[np.ndarray, bool]:
+    """Normalised per-fold weights for soft voting, plus a fallback flag.
 
     ``inner_score`` uses each base model's balanced accuracy from nested search
     within the same outer fold, avoiding leakage. Non-positive scores receive
-    zero weight; if all scores are unusable, weights fall back to equal.
+    zero weight; if all scores are unusable, weights fall back to equal --
+    the flag lets the fold report say so instead of publishing a
+    ``weights`` dict that silently contradicts the configured weighting.
     """
 
     if weighting == "equal":
-        return np.full(len(scores), 1.0 / len(scores))
+        return np.full(len(scores), 1.0 / len(scores)), False
     values = np.where(np.isfinite(scores) & (np.asarray(scores) > 0), scores, 0.0)
     total = values.sum()
     if total <= 0:
-        return np.full(len(scores), 1.0 / len(scores))
-    return values / total
+        return np.full(len(scores), 1.0 / len(scores)), True
+    return values / total, False
 
 
 def _base_config_for_ensemble(config: ExperimentConfig, model: str) -> ExperimentConfig:
@@ -791,7 +825,7 @@ def run_ensemble(
             indexed.append(match)
 
         scores = [_fold_tuning_score(match) for match in indexed]
-        weights = _fold_weights(scores, config.ensemble_weighting)
+        weights, weighting_fallback = _fold_weights(scores, config.ensemble_weighting)
         averaged = sum(
             weight * result.probabilities[test_idx]
             for weight, result in zip(weights, base_results)
@@ -824,6 +858,10 @@ def run_ensemble(
                     model: float(weight)
                     for model, weight in zip(config.ensemble_models, weights)
                 },
+                # Recorded when the configured weighting produced no usable
+                # score and the vote silently became equal-weight; without it
+                # the reader cannot tell inner_score from equal.
+                "weighting_fallback": weighting_fallback,
                 "base_models": [
                     {
                         "model": base_config.model,

@@ -173,7 +173,7 @@ def test_interpret_exports_the_panel_renderer() -> None:
     assert callable(render_metric_panel)
 
 
-def test_interpret_runs_end_to_end_on_profile_view(tmp_path) -> None:
+def test_interpret_runs_end_to_end_on_profile_view(tmp_path, capsys) -> None:
     """End-to-end regression: interpret extracts coefficients and exports heatmaps."""
 
     from dit.cli.main import main
@@ -197,6 +197,19 @@ def test_interpret_runs_end_to_end_on_profile_view(tmp_path) -> None:
     assert heatmaps_dir.is_dir()
     png_files = list(heatmaps_dir.glob("*.png"))
     assert len(png_files) > 0
+    # stdout's reports field is consumed as a list of paths: a stray tuple
+    # repr there breaks every script that parses the CLI output.
+    stdout = json.loads(capsys.readouterr().out)
+    for report in stdout["reports"]:
+        assert not report.startswith("("), report
+    # The interpret.json heatmaps block pairs each sanitised filename with
+    # the metric it came from, and every listed file exists.
+    payload = json.loads((tmp_path / "interpret.json").read_text(encoding="utf-8"))
+    assert payload["heatmaps"]
+    for entry in payload["heatmaps"]:
+        assert set(entry) == {"metric", "path"}
+        assert isinstance(entry["metric"], str) and entry["metric"]
+        assert (tmp_path / entry["path"]).exists()
 
 
 def test_version_flag_reports_the_package_version(capsys) -> None:

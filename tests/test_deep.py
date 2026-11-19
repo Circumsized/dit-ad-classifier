@@ -290,7 +290,7 @@ class TestDomainAlignedClassifier:
 
     def test_normalisation_statistics_come_from_training_rows_only(self) -> None:
         profiles, labels, site = self._bundle()
-        train, test = profiles[:50], profiles[50:]
+        train, _test = profiles[:50], profiles[50:]
         # The centred value must match the mean over the training slice that
         # _split_indices actually keeps, not over every row handed to fit().
         classifier = DomainAlignedClassifier(SMALL)

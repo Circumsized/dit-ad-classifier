@@ -302,9 +302,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 def _csv_safe(value: object) -> str:
     """Neutralise spreadsheet formula injection in a data-controlled cell.
 
-    Subject identifiers come from the data file and land in the first CSV
-    column; a leading ``=``, ``+``, ``-``, ``@``, tab, CR or LF would otherwise
-    be evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
+    Every data-controlled cell gets this treatment: subject identifiers land
+    in the first column, and class names (from the data coding or the
+    artifact's label map) reach label cells and the ``p_{name}`` headers.  A
+    leading ``=``, ``+``, ``-``, ``@``, tab, CR or LF would otherwise be
+    evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
     """
 
     text = str(value)
@@ -605,7 +607,9 @@ def cmd_interpret(args: argparse.Namespace) -> int:
         ]
     # One write, after the heatmap key exists: writing twice serialised the
     # whole payload a second time for no gain.
-    written = [write_json(out_dir / "interpret.json", payload), *heatmaps]
+    written = [write_json(out_dir / "interpret.json", payload)] + [
+        path for _, path in heatmaps
+    ]
     print(json.dumps({"top_predictors": coefficients[:5], "reports": [str(p) for p in written]}, indent=2))
     return 0
 

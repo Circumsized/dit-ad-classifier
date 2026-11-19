@@ -331,6 +331,33 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="config"):
             load_deployment_artifact(target)
 
+    def test_load_refuses_a_null_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # A null section is corruption with the key present: refuse at load
+        # with the artifact path instead of an AttributeError later.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": None,
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 1],
+            }
+        )
+        target = tmp_path / "null_section.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="null 'label_map' section"):
+            load_deployment_artifact(target)
+
     def test_load_refuses_an_artifact_missing_a_required_section(self, tmp_path) -> None:
         import hashlib
         import pickle as pickle_module
@@ -346,7 +373,9 @@ class TestDeploymentClosure:
         target.write_bytes(payload)
         digest = hashlib.sha256(payload).hexdigest()
         _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="'pipeline' section"):
+        # The loader reports the first missing section it reaches (config
+        # builds first, then label_map), each named with the artifact path.
+        with pytest.raises(ValueError, match="'label_map' section"):
             load_deployment_artifact(target)
 
     def test_load_refuses_an_incompatible_config_section(self, tmp_path) -> None:
@@ -555,3 +584,58 @@ class TestDeploymentClosure:
         outcome = predict_unlabeled(subset, model)
         assert set(np.unique(outcome["predictions"]).tolist()) <= {0, 2}
         assert all(name in {"NC", "AD"} for name in outcome["predicted_names"])
+
+    def test_load_refuses_float_coerced_classes(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # np.asarray(dtype=int) would silently truncate [1.9, 2.9] to [1, 2] --
+        # classes 1 and 2, a class no subject belongs to -- reviving the
+        # mislabelled-submission bug through the loading door.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC", 2: "AD"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [1.9, 2.9],
+            }
+        )
+        target = tmp_path / "float_classes.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="malformed 'classes'"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_disagreeing_classes_and_label_map(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # classes_ wider than label_map used to silently drop the extra
+        # probability column from the submission CSV (exit 0).
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC", 1: "MCI"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 1, 2],
+            }
+        )
+        target = tmp_path / "mismatched.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="disagree"):
+            load_deployment_artifact(target)

@@ -202,9 +202,10 @@ class DatasetBundle:
         """Canonical label to display name, for every present class.
 
         Resolution order matches ``_label_for``: the bundle's own
-        ``class_labels``, then the coding its source file used
-        (:func:`raw_label_names`), and only for a completely unnamed bundle
-        the canonical default table.
+        ``class_labels`` first, then the coding its source file used
+        (:func:`raw_label_names`); any label neither covers falls back to the
+        canonical default table -- which is only faithful when the missing
+        label really is the canonical NC/MCI/AD position.
         """
 
         result: dict[int, str] = {}

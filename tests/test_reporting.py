@@ -275,9 +275,13 @@ def test_paired_comparison_section_renders_and_serializes_strictly(tmp_path) -> 
     assert json.loads(output.read_text(encoding="utf-8"))["paired_comparisons"]
 
 
-def test_write_json_refuses_nonstandard_nan(tmp_path) -> None:
-    with pytest.raises(ValueError, match="Out of range"):
-        write_json(tmp_path / "bad.json", {"value": float("nan")})
+def test_write_json_maps_non_finite_to_null(tmp_path) -> None:
+    # write_json runs _json_safe before the strict dump, so a non-finite
+    # float lands as null instead of either a bare NaN token or a crash --
+    # the same contract assemble_report has always had at its boundary.
+    write_json(tmp_path / "bad.json", {"value": float("nan")})
+    restored = json.loads((tmp_path / "bad.json").read_text(encoding="utf-8"))
+    assert restored["value"] is None
 
 
 def test_markdown_tables_escape_data_controlled_cells() -> None:

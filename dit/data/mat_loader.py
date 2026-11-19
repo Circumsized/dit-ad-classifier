@@ -375,7 +375,11 @@ def _choose_axis(
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            return matches[0]
+            raise ValueError(
+                f"expected {target} subjects but {len(matches)} axes of the "
+                f"tensor {shape} match ({matches}); the layout is ambiguous -- "
+                "rename the offending axis or pass an explicit metrics subset"
+            )
         if require_hint:
             raise ValueError(
                 f"expected {target} subjects but no axis of the tensor {shape} "

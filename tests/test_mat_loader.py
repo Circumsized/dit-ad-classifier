@@ -519,3 +519,22 @@ class TestAmbiguousRawCoding:
         assert binary.n_samples == 30
         assert binary.label_map == {0: "NC", 1: "AD"}
         assert binary.y.tolist() == [0, 1] * 15
+
+
+class TestAxisAmbiguity:
+    """A label length matching two axes is an ambiguous layout, not a guess."""
+
+    def test_multi_axis_match_is_refused(self, tmp_path) -> None:
+        # 12 subjects, but tract count is also 12: the subject axis cannot be
+        # located without guessing, and guessing once redefined the tensor.
+        rng = np.random.default_rng(3)
+        n = 12
+        _write(
+            {
+                "train_set": rng.normal(size=(n, n, 10, 2)),
+                "train_diagnose": np.tile([1, 2, 3], n // 3),
+            },
+            tmp_path / "data.mat",
+        )
+        with pytest.raises(ValueError, match="ambiguous"):
+            load_ai4ad_mat(tmp_path / "data.mat")

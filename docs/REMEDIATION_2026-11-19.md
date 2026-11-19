@@ -30,6 +30,8 @@
 | C8 | `fab3172` | `paired_fold_comparison` 15 条拒绝路径全参数化钉住（含正控制防空过） | 39 passed |
 | C9 | `10898af` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
 | R1 | `950b08a` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
+| R2 | `7c7428b`..`e31e3bf` | 6 专家交叉复审处置：删两具清理残留尸体；binary_view 接线/LOSO 缺 AD 折/OOF 守卫三承重测试（变异实测杀死）；deployment 全段 ValueError 包装；CSV 类名列消毒；interpret 拒绝 `--alignment`；md_cell 加 caveats；热图截断/大小写折叠/metric 配对；`predict_unlabeled` 经 classes_ 映射；ExperimentConfig 值类型守卫；`tests/test_config.py` 首个 config loader 测试 | 657 passed |
+| R3 | 本轮 | R2 diff 的 3 专家复审 + P3 积压清理：stdout reports tuple 回归（R2 引入，已修）；markdown config 块与 `write_json` 统一 `_json_safe`；`ThresholdPolicy` 构造校验 + `_MAX_PASSES` 命名；`smooth_profiles`/`label_map` docstring 对齐实现；`_choose_axis` 拒绝多轴歧义；Windows 保留名防御；fold 权重回退标记键；导出面补全；`prepare_matrix` 形态统一；summary 列序与 per_site 语义钉扎；`md_cell` 覆盖全部 Python 行分隔符；`threshold_criterion` tuple 成员测试；config.py 非映射 experiment 与混合键排序；deployment label_map 键/classes 强转/不变量校验；savefig 失败清理半写文件；ruff 工具链（F821/F841/E9）入 dev extras 并全绿 | 最终计数见 §5 |
 
 净结果：**525 → 637 passed**（C12 移除 10 个仅服务于被删 API 的用例；生产路径
 测试净增 122 个），无既有断言被弱化（唯一删除是随死代码移除的
@@ -73,6 +75,7 @@
 
 ```bash
 cd DIT-
-.venv/Scripts/python.exe -m pytest tests/ -q        # 637 passed
+.venv/Scripts/python.exe -m pytest tests/ -q        # 676 passed（截至 R3）
+.venv/Scripts/python.exe -m ruff check dit/ tests/  # F821/F841/E9 全绿
 git diff b33c8c7..HEAD --stat                       # 修复 commit 全集
 ```

@@ -28,6 +28,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Coordinate descent over the per-class offsets usually converges in the
+# first two passes; the cap is a safety ceiling, not a tuning knob, and the
+# search is monotone so stopping early can only leave score on the table.
+_MAX_PASSES = 2
+
+
 GRIDS: dict[str, tuple[float, ...]] = {
     "f1": tuple(np.linspace(0.05, 0.95, 181).tolist()),
     "balanced": tuple(np.linspace(0.05, 0.95, 181).tolist()),
@@ -47,6 +53,20 @@ class ThresholdPolicy:
     class_ids: tuple[int, ...]
     criterion: str
     score: float
+
+    def __post_init__(self) -> None:
+        # A policy with mismatched columns indexes out of range on first use;
+        # refuse it at construction where the mistake was made.
+        if len(self.thresholds) != len(self.class_ids):
+            raise ValueError(
+                f"one threshold per class required: got {len(self.thresholds)} "
+                f"thresholds for {len(self.class_ids)} classes"
+            )
+        if len(self.class_ids) != len(set(self.class_ids)):
+            raise ValueError("class ids must not repeat")
+        for threshold in self.thresholds:
+            if not 0.0 <= float(threshold) <= 1.0:
+                raise ValueError(f"thresholds must be in [0, 1], got {threshold}")
 
     @property
     def n_classes(self) -> int:
@@ -174,7 +194,7 @@ def fit_threshold(
     if not np.isfinite(best_score):
         raise ValueError("threshold search produced no finite score")
 
-    for _pass in range(2):
+    for _pass in range(_MAX_PASSES):
         improved = False
         for index in range(len(ids)):
             current = offsets[index]

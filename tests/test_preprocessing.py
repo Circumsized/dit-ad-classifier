@@ -333,3 +333,58 @@ class TestCovariateHelpers:
     def test_strip_covariates_rejects_degenerate_width(self) -> None:
         with pytest.raises(ValueError, match="no non-covariate columns"):
             strip_covariate_columns(np.zeros((3, 2)))
+
+
+class TestSummaryColumnOrder:
+    """The summary view's column order is stat-major and layout-coupled.
+
+    Nothing else pins which statistic sits in which column: a swapped tuple
+    in ``_profile_summary`` would keep every column count, layout validation
+    and selection test green while silently relabelling anatomy.  The check
+    goes through the production builder and matches each column against the
+    name ``feature_names()`` claims for it.
+    """
+
+    def test_each_column_matches_the_stat_its_name_claims(self) -> None:
+        rng = np.random.default_rng(7)
+        X = rng.normal(size=(1, 2, 9, 1)).astype(np.float32)
+        X[0, 0, :, 0] = np.arange(9, dtype=np.float32)  # tract 0: slope 1
+        view = DatasetBundle(X=X)
+        features = build_feature_matrix(view, view="summary", smooth_window=1, include_covariates=False)
+        layout = describe_feature_layout(view, view="summary", include_covariates=False)
+        names = layout.feature_names()
+
+        x = np.linspace(-1.0, 1.0, 9)
+        ramp = np.arange(9, dtype=float)
+        expected_area = float(np.trapezoid(ramp, x)) if hasattr(np, "trapezoid") else float(
+            np.trapz(ramp, x)
+        )
+        tract1 = _nan_slope(X, x)[0, 1, 0]
+        area1 = _nan_area(X, x)[0, 1, 0]
+        by_stat = {
+            "mean": {
+                ("tract_00", "metric_00"): float(np.nanmean(X[0, 0, :, 0])),
+                ("tract_01", "metric_00"): float(np.nanmean(X[0, 1, :, 0])),
+            },
+            "std": {
+                ("tract_00", "metric_00"): float(np.nanstd(X[0, 0, :, 0])),
+                ("tract_01", "metric_00"): float(np.nanstd(X[0, 1, :, 0])),
+            },
+            "slope": {
+                # 0..8 mapped onto x in [-1, 1] is y = 4(x + 1).
+                ("tract_00", "metric_00"): 4.0,
+                ("tract_01", "metric_00"): float(tract1),
+            },
+            "area": {
+                ("tract_00", "metric_00"): expected_area,
+                ("tract_01", "metric_00"): float(area1),
+            },
+        }
+        checked = 0
+        for column, name in enumerate(names):
+            tract, metric, stat = name.split("|")
+            assert features[0, column] == pytest.approx(
+                by_stat[stat][(tract, metric)], rel=1e-3
+            ), f"column {column} ({name}) does not hold its claimed statistic"
+            checked += 1
+        assert checked == 8  # 2 tracts x 1 metric x 4 stats
