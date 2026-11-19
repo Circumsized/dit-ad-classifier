@@ -212,6 +212,30 @@ class TestDatasetBundle:
         assert len(summary["site_counts"]) == 5
         assert 0.0 <= float(summary["missing_fraction"]) <= 1.0
 
+    def test_summary_reports_metadata_presence(self) -> None:
+        # A MAT file without the population/site keys degrades to all-NaN
+        # demographics and all-(-1) sites; the report must be able to say so.
+        complete = make_synthetic_bundle(n_samples=30, n_sites=3)
+        summary = complete.summary()
+        assert summary["demographics_available"] is True
+        assert summary["site_available"] is True
+        assert summary["n_missing_site"] == 0
+
+        missing = DatasetBundle(
+            X=complete.X,
+            y=complete.y,
+            age=np.full(30, np.nan),
+            site=np.full(30, -1, dtype=np.int64),
+        )
+        degraded = missing.summary()
+        assert degraded["demographics_available"] is False
+        assert degraded["site_available"] is False
+        assert degraded["n_missing_site"] == 30
+
+        partial = DatasetBundle(X=complete.X, y=complete.y, site=np.array([0] * 27 + [-1] * 3))
+        assert partial.summary()["n_missing_site"] == 3
+        assert partial.summary()["site_available"] is True
+
 
 class TestRawLabelNames:
     """The naming table follows the coding the source file actually used."""

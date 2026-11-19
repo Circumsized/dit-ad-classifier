@@ -327,4 +327,17 @@ class DatasetBundle:
                 else None
             ),
             "missing_fraction": float(np.mean(~self.mask)),
+            # Presence flags, not values: a MAT file without the population or
+            # site keys silently becomes all-NaN age/sex and all-(-1) sites,
+            # and without these fields no report could tell that from a real
+            # measurement gap.
+            "demographics_available": bool(
+                self.age is not None and bool(np.any(np.isfinite(self.age)))
+            ),
+            "site_available": bool(
+                self.site is not None and bool(np.any(self.site >= 0))
+            ),
+            "n_missing_site": (
+                int(np.sum(self.site == -1)) if self.site is not None else 0
+            ),
         }
