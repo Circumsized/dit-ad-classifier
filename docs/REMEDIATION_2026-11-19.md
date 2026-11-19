@@ -29,8 +29,9 @@
 | C11 | `4107688` | 删除零引用死代码 9 处 + 4 个未用导入；`evaluate_classical`/`evaluate_metric_ensemble`/`TractFeaturePreprocessor` 加 docstring 警告（公开 API 删除留待用户裁决） | 120 + 86 passed |
 | C8 | `fab3172` | `paired_fold_comparison` 15 条拒绝路径全参数化钉住（含正控制防空过） | 39 passed |
 | C9 | `10898af` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
+| R1 | `950b08a` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
 
-净结果：**525 → 645 passed**，无既有断言被弱化（唯一删除是随死代码移除的
+净结果：**525 → 647 passed**（含复审修复轮 R1 的 3 个回归测试），无既有断言被弱化（唯一删除是随死代码移除的
 `threshold_sweep` 专属测试，commit message 已声明）。
 
 ## 3. 每修复循环 SOP（本批实际执行）
