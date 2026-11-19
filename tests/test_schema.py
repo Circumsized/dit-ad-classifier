@@ -307,3 +307,20 @@ class TestLabelNameResolution:
         bundle = self._bundle([0, 0, 0], class_labels={0: "NC"}, raw_label_map={3: 0})
         with pytest.raises(ValueError, match="needs both an NC and an AD"):
             bundle.task_view("binary")
+
+
+class TestDisplayFallbackFollowsTheSourceCoding:
+    """label_map/class_names resolve the same way _label_for does."""
+
+    def test_partial_names_fall_back_to_the_raw_coding(self) -> None:
+        # class_labels names canonical 0; canonical 1 is only named by the
+        # source coding (official 2=MCI), so the display must not rename it
+        # through the canonical default table.
+        bundle = DatasetBundle(
+            X=np.zeros((4, 2, 3, 1), dtype=np.float32),
+            y=np.array([0, 0, 1, 1], dtype=np.int64),
+            class_labels={0: "Healthy"},
+            raw_label_map={1: 0, 2: 1},
+        )
+        assert bundle.label_map == {0: "Healthy", 1: "MCI"}
+        assert bundle.class_names == ("Healthy", "MCI")

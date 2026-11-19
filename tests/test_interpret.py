@@ -321,6 +321,15 @@ class TestMetricPanelFilenames:
         assert len({path.name for path in paths}) == 2
         assert all(path.parent == tmp_path for path in paths)
 
+    def test_chained_collisions_all_get_distinct_files(self, tmp_path) -> None:
+        # "_A" cleans to "A" (collides with metric 0), whose disambiguated
+        # "A_2" collides with metric 1's natural stem: one suffix is not
+        # enough, the third heatmap must not silently overwrite the second.
+        paths = render_metric_panel(self._rows(n_metrics=3), self._layout(("A", "A_2", "_A")), out_dir=tmp_path)
+        assert len(paths) == 3
+        assert len({path.name for path in paths}) == 3
+        assert all(path.parent == tmp_path for path in paths)
+
 
 class TestInterpretRefusesUnimplementedFlags:
     """The interpretation path fits one model on every row, so the flags that

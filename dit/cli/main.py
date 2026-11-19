@@ -461,11 +461,28 @@ def _write_ablation_csv(out_dir: str | Path, rows: list[dict[str, object]]) -> P
     ]
     target = Path(out_dir) / "ablation_table.csv"
     target.parent.mkdir(parents=True, exist_ok=True)
+    # ``view`` can be a .mat metric name, so the string columns get the same
+    # formula-injection neutralisation as the subject-id columns; numeric
+    # columns are formatted floats and cannot start a formula.
+    numeric = {
+        "accuracy",
+        "balanced_accuracy",
+        "macro_f1",
+        "roc_auc",
+        "ece",
+        "aggregate_argmax_accuracy",
+        "threshold",
+    }
     with target.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key) for key in columns})
+            writer.writerow(
+                {
+                    key: row.get(key) if key in numeric else _csv_safe(row.get(key))
+                    for key in columns
+                }
+            )
     return target
 
 
@@ -570,11 +587,13 @@ def cmd_interpret(args: argparse.Namespace) -> int:
         "literature_hits": literature_hits(coefficients, layout),
         "environment": environment_fingerprint(config.seed),
     }
-    written = [write_json(out_dir / "interpret.json", payload)]
+    heatmaps: list[Path] = []
     if layout.kind in {"profile", "metric"}:
         heatmaps = render_metric_panel(coefficients, layout, out_dir=out_dir / "heatmaps")
         payload["heatmaps"] = [str(path) for path in heatmaps]
-        written = [write_json(out_dir / "interpret.json", payload)] + heatmaps
+    # One write, after the heatmap key exists: writing twice serialised the
+    # whole payload a second time for no gain.
+    written = [write_json(out_dir / "interpret.json", payload), *heatmaps]
     print(json.dumps({"top_predictors": coefficients[:5], "reports": [str(p) for p in written]}, indent=2))
     return 0
 
