@@ -50,6 +50,24 @@ def canonicalize_labels(labels: Iterable[int]) -> tuple[np.ndarray, dict[int, in
     return np.asarray([mapping[int(value)] for value in values], dtype=np.int64), mapping
 
 
+def raw_label_names(raw_label_map: Mapping[int, int]) -> dict[int, str]:
+    """Name each canonical label from the coding the source actually used.
+
+    The table is chosen by the raw keys: official AI4AD files code 1/2/3 and
+    already-canonical files code 0/1/2. Naming a canonical file with the
+    official table shifts every class by one, so a 0/1/2 file would lose its
+    AD class and report two classes called NC.
+    """
+
+    official = set(raw_label_map) <= {1, 2, 3}
+    table = LABEL_NAMES if official else CANONICAL_NAMES
+    return {
+        int(canonical): table[int(raw)]
+        for raw, canonical in raw_label_map.items()
+        if int(raw) in table
+    }
+
+
 @dataclass(frozen=True)
 class DatasetBundle:
     """Validated AFQ dataset.
@@ -218,10 +236,12 @@ class DatasetBundle:
 
         reference = self._label_for("NC")
         disease = self._label_for("AD")
-        if reference is None or disease is None:
+        if reference is None or disease is None or reference == disease:
             raise ValueError(
                 "binary view needs both an NC and an AD class; found "
-                f"{sorted(set(self.y.tolist()))}"
+                f"{sorted(set(self.y.tolist()))}; name the classes with "
+                "class_labels when the source coding is not official 1/2/3 "
+                "or canonical 0/1/2"
             )
         keep = np.isin(self.y, [reference, disease])
         selected = self.select(np.flatnonzero(keep))
@@ -233,18 +253,27 @@ class DatasetBundle:
         return selected
 
     def _label_for(self, name: str) -> int | None:
-        """Find the canonical label carrying a given class name."""
+        """Find the canonical label carrying a given class name.
 
+        Only labels present in ``y`` resolve, so a name backed by no subject
+        cannot fabricate a class. The canonical table is a default for
+        unnamed bundles only: once ``class_labels`` or ``raw_label_map`` name
+        the classes they are authoritative, and a missing name means the
+        class is absent rather than misnamed.
+        """
+
+        present = {int(label) for label in np.unique(self.y)} if self.y is not None else set()
         if self.class_labels:
             for label, label_name in self.class_labels.items():
-                if str(label_name) == name:
+                if str(label_name) == name and int(label) in present:
                     return int(label)
-        for raw, canonical in self.raw_label_map.items():
-            if LABEL_NAMES.get(int(raw)) == name:
+        for canonical, label_name in raw_label_names(self.raw_label_map).items():
+            if label_name == name and canonical in present:
                 return int(canonical)
-        for label, label_name in CANONICAL_NAMES.items():
-            if label_name == name:
-                return int(label)
+        if not self.class_labels and not self.raw_label_map:
+            for label, label_name in CANONICAL_NAMES.items():
+                if label_name == name and label in present:
+                    return int(label)
         return None
 
     @property

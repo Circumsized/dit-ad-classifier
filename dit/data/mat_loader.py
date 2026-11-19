@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .schema import LABEL_NAMES, DatasetBundle, canonicalize_labels
+from .schema import DatasetBundle, canonicalize_labels, raw_label_names
 
 OFFICIAL_REPOSITORY = "https://github.com/YongLiuLab/AI4AD_AFQ"
 KNOWN_METRICS = ("FA", "MD", "RD", "AD", "CL", "CURVATURE", "TORSION", "VOLUME")
@@ -110,10 +110,11 @@ def load_ai4ad_mat(
     else:
         subject_id = np.arange(n_samples, dtype=np.int64)
 
-    class_labels: dict[int, str] = {}
-    for raw, canonical in raw_label_map.items():
-        if int(raw) in LABEL_NAMES:
-            class_labels[int(canonical)] = LABEL_NAMES[int(raw)]
+    # Name classes from the coding the file used: official 1/2/3 files map
+    # through LABEL_NAMES, already-canonical 0/1/2 files through
+    # CANONICAL_NAMES. The official table would shift a canonical file's
+    # classes by one and drop its AD class.
+    class_labels: dict[int, str] = raw_label_names(raw_label_map)
 
     return DatasetBundle(
         X=X,
