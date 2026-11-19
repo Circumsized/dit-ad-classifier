@@ -745,7 +745,7 @@ class TestSiteGroupedSelection:
         )
         # Site-grouped selection is the Track-B (LOSO) protocol: stratified and
         # site-stratified outer folds must keep the class-stratified hold-out
-        # even when site labels exist, matching the classical path's _inner_cv
+        # even when site labels exist, matching the classical path's _inner_cv_for
         # rule.  Every synthetic site holds both classes, so LOSO engages it.
         assert site_report["inner_cv"] == "site_grouped"
         assert stratified_report["inner_cv"] == "class_stratified"
