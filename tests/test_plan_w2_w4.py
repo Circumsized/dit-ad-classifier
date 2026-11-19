@@ -315,6 +315,40 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="checksum mismatch"):
             load_deployment_artifact(artifact)
 
+    def test_load_refuses_an_artifact_without_a_config_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        payload = pickle_module.dumps({"artifact_version": ARTIFACT_VERSION})
+        target = tmp_path / "no_config.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        # A missing config section is a corrupt artifact, not a KeyError
+        # traceback: the CLI only catches ValueError.
+        with pytest.raises(ValueError, match="config"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_an_incompatible_config_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # An artifact whose config keys no longer line up (older/newer writer)
+        # must surface as a clean ValueError, not a TypeError traceback.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "config": {"renamed_field": 1}}
+        )
+        target = tmp_path / "future.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="incompatible"):
+            load_deployment_artifact(target)
+
     def test_load_refuses_a_missing_sidecar(self, tmp_path) -> None:
         from dit.deployment import load_deployment_artifact, save_deployment_artifact
 

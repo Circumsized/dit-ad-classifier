@@ -609,3 +609,114 @@ def test_all_validated_addresses_refusing_raises_fetch_error(
             "http://research.example/f.mat",
             resolver=lambda host: [ipaddress.ip_address("93.184.216.34")],
         )
+
+
+def test_query_string_survives_validation() -> None:
+    # The query is part of the request target: dropping it requests a
+    # different resource, which for signed/versioned URLs means a 403 or the
+    # wrong body written to disk as data.
+    target = validate_url(
+        "https://93.184.216.34" + "/data/file.mat?ver=2&x=1", resolver=_resolver("93.184.216.34")
+    )
+    assert target.path == "/data/file.mat?ver=2&x=1"
+    assert target.url == "https://93.184.216.34" + "/data/file.mat?ver=2&x=1"
+
+
+def test_request_line_carries_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    seen: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def getheader(self, name: str):
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def request(self, method: str, path: str, headers=None) -> None:
+            seen.append(path)
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", FakeConnection)
+    monkeypatch.setattr(http.client, "HTTPSConnection", FakeConnection)
+    safe_request(
+        "https://93.184.216.34" + "/data/file.mat?ver=2",
+        resolver=_resolver("93.184.216.34"),
+    )
+    assert seen == ["/data/file.mat?ver=2"]
+
+
+def test_truncated_response_is_a_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # http.client.IncompleteRead is an HTTPException, not an OSError: without
+    # wrapping it, a server that hangs up early escapes safe_request as a
+    # traceback instead of the CLI's one-line 'refused'/'failed' contract.
+    import http.client
+
+    class FakeResponse:
+        status = 200
+
+        def getheader(self, name: str):
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            raise http.client.IncompleteRead(b"partial body")
+
+        def close(self) -> None:
+            pass
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def request(self, *args, **kwargs) -> None:
+            pass
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", FakeConnection)
+    monkeypatch.setattr(http.client, "HTTPSConnection", FakeConnection)
+    with pytest.raises(FetchError, match="failed"):
+        safe_request("https://93.184.216.34" + "/truncated", resolver=_resolver("93.184.216.34"))
+
+
+def test_malformed_request_line_is_a_fetch_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # InvalidURL is an HTTPException too; a control character that survives
+    # URL parsing must not escape as a raw traceback either.
+    import http.client
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def request(self, *args, **kwargs) -> None:
+            raise http.client.InvalidURL("unsafe characters")
+
+        def getresponse(self):
+            raise AssertionError("request must fail first")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPConnection", FakeConnection)
+    monkeypatch.setattr(http.client, "HTTPSConnection", FakeConnection)
+    with pytest.raises(FetchError, match="failed"):
+        safe_request("https://93.184.216.34" + "/bad", resolver=_resolver("93.184.216.34"))
