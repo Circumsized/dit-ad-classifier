@@ -281,12 +281,3 @@ class SparseBlockSelector:
             "retained_nodes": self.retained_nodes(),
             "block_scores": self.block_scores_,
         }
-
-        return Pipeline(
-            [
-                ("selector", selector),
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", estimator_factory()),
-            ]
-        )
