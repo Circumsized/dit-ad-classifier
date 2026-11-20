@@ -78,13 +78,12 @@ def site_stratified_kfold_indices(
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
     """Yield deterministic folds that hold out 1/n of every site.
 
-    Ported from the 2020 upstream ``data_division.py`` protocol: every fold's
-    test slice draws a proportional chunk from each site, so site prevalence
-    is balanced across folds (unlike LOSO, which removes a site entirely).
-    Remainder subjects are dealt round-robin instead of the upstream's
-    last-chunk padding. Expects integer-coded site labels (the MAT loader
-    emits int64 with -1 for missing); other dtypes are outside the data
-    contract.
+    Every fold's test slice draws a proportional chunk from each site, so
+    site prevalence is balanced across folds (unlike LOSO, which removes a
+    site entirely). Remainder subjects are dealt round-robin rather than
+    pushed into the last fold, which would unbalance fold sizes.
+    Expects integer-coded site labels (the MAT loader emits int64 with -1
+    for missing); other dtypes are outside the data contract.
     """
 
     groups = _validate_site(site)

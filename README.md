@@ -454,7 +454,7 @@ DIT-/
 │   └── LICENSE_TODO.md          知识产权归属与资产合规备忘录
 ├── legacy/                      历史遗留归档 (禁止执行，作为审计基准保留)
 │   ├── _DO_NOT_RUN.md           历史缺陷分析与执行禁止警示清单
-│   └── afq2020_reference/       2020 竞赛初始代码存档及站点划分清单
+│   └── afq2020_reference/       早期版本代码存档及站点划分清单
 ├── tests/                       自动化回归测试套件 (689 个测试用例)
 ├── LICENSE                      MIT 开源软件许可证文本
 └── pyproject.toml               打包与依赖声明文件

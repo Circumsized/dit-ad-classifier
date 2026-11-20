@@ -1,7 +1,7 @@
 # 系统重构架构审计与工程实施全景方案 (OPTIMIZATION PLAN & ROADMAP)
 
 **文档类型：历史架构审计与工程实施全景报告 (System Audit & Roadmap)**  
-**审计基线：2020 原始课程作业脚本归档 (`legacy/`)**  
+**审计基线：早期版本脚本归档 (`legacy/`)**  
 **当前状态：P0 至 P6 阶段已全部实施交付 (Fully Delivered & Verified)**  
 **基准标杆：首届世界智能医学大会 AI4AD 多中心 DTI 阿尔茨海默病分类竞赛 (Qu et al., *Brain Disorders* 2021;1:100005)**
 
@@ -56,7 +56,7 @@ $$\mathbf{S}^{-1} \text{ 不存在}$$
 
 ## 2. 遗留系统代码根因审计矩阵
 
-对 `legacy/` 目录下 2020 年课程作业代码进行系统级逐行审计，确诊 8 项致命工程缺陷（Fatal Defects, F1–F8）与 18 项方法学缺陷（Methodological Defects, S1–S18）。
+对 `legacy/` 目录下早期版本代码进行系统级逐行审计，确诊 8 项致命工程缺陷（Fatal Defects, F1–F8）与 18 项方法学缺陷（Methodological Defects, S1–S18）。
 
 ```
 +---------------------------------------------------------------------------------------------+
