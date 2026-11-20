@@ -488,10 +488,6 @@ def _write_ablation_csv(out_dir: str | Path, rows: list[dict[str, object]]) -> P
     return target
 
 
-def experiment_payload_of_base(base: dict) -> dict[str, object]:
-    return base
-
-
 def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], written: list[Path]) -> None:
     header = "| model | view | covariate | ACC | bal.ACC | F1 | AUC | argmax ACC | thr |"
     lines = ["# Ablation table", "", header, "|" + "---|" * 9]

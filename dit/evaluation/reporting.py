@@ -218,7 +218,12 @@ def assemble_report(
             "feature_view": result.feature_view,
             "aggregate": result.aggregate,
             "fold_metric_spread": {
-                metric: pairwise_fold_delta([float(fold.get(metric, np.nan)) for fold in result.folds])
+                metric: pairwise_fold_delta(
+                    [
+                        np.nan if fold.get(metric) is None else float(fold[metric])
+                        for fold in result.folds
+                    ]
+                )
                 for metric in ("accuracy", "balanced_accuracy", "macro_f1")
                 if all(metric in fold for fold in result.folds)
             },
@@ -260,8 +265,12 @@ def result_key(result) -> str:
 def _json_safe(value: object) -> object:
     """Replace non-finite floats before strict JSON serialization.
 
-    Unavailable metrics become JSON ``null`` instead of the non-standard
-    ``NaN`` token. Scalar and container types are preserved recursively.
+    Semantics at the file boundary: a non-finite number (NaN/inf from a
+    computed metric) becomes JSON ``null`` with its key present; a key that
+    was never recorded (explicit ``None`` in a fold report) is dropped by the
+    table builders and is simply absent. A reader can therefore tell "the
+    metric was computed and came out non-finite" from "the metric was not
+    recorded". Scalar and container types are preserved recursively.
     """
 
     if isinstance(value, np.bool_):
@@ -408,7 +417,9 @@ def md_cell(value: object) -> str:
 
 
 def _json_block(value: object) -> str:
-    return "```json\n" + json.dumps(value, indent=2, allow_nan=False) + "\n```"
+    # Same boundary as write_json: non-finite floats become null rather than
+    # crashing the Markdown render half-way through a report.
+    return "```json\n" + json.dumps(_json_safe(value), indent=2, allow_nan=False) + "\n```"
 
 
 def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
@@ -459,16 +470,19 @@ def _results_table(results: list[dict[str, object]]) -> str:
         aggregate = entry["aggregate"]
         folds = entry.get("folds", [])
         lines.append(
-            "| {model} | {task} | {split} | {view} | {acc:.3f} | {auc} | {f1:.3f} | "
-            "{bal:.3f} | {sens} | {spec} | {nfolds} |".format(
+            "| {model} | {task} | {split} | {view} | {acc} | {auc} | {f1} | "
+            "{bal} | {sens} | {spec} | {nfolds} |".format(
                 model=md_cell(entry["model"]),
                 task=md_cell(entry["task"]),
                 split=md_cell(entry["split_strategy"]),
                 view=md_cell(entry["feature_view"]),
-                acc=float(aggregate["accuracy"]),
+                # null (non-finite metric) renders as "-" here; a bare
+                # float(None) would crash the Markdown after the JSON was
+                # already written.
+                acc=(f"{float(aggregate['accuracy']):.3f}" if aggregate.get("accuracy") is not None else "-"),
                 auc=(f"{float(aggregate['roc_auc']):.3f}" if aggregate.get("roc_auc") is not None else "-"),
-                f1=float(aggregate["macro_f1"]),
-                bal=float(aggregate["balanced_accuracy"]),
+                f1=(f"{float(aggregate['macro_f1']):.3f}" if aggregate.get("macro_f1") is not None else "-"),
+                bal=(f"{float(aggregate['balanced_accuracy']):.3f}" if aggregate.get("balanced_accuracy") is not None else "-"),
                 sens=(
                     f"{float(aggregate['sensitivity']):.3f}"
                     if aggregate.get("sensitivity") is not None

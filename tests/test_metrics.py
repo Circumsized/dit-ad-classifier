@@ -88,3 +88,11 @@ def test_ece_refuses_a_degenerate_bin_count() -> None:
         expected_calibration_error(y, probabilities, n_bins=0)
     with pytest.raises(ValueError, match="n_bins"):
         expected_calibration_error(y, probabilities, n_bins=-1)
+
+
+def test_ece_refuses_non_integer_bin_counts() -> None:
+    y = np.array([0, 1, 0, 1])
+    probabilities = np.tile([[0.6, 0.4], [0.4, 0.6]], (2, 1))
+    for bad in (10.0, None, True, "10"):
+        with pytest.raises(ValueError, match="n_bins must be an integer"):
+            expected_calibration_error(y, probabilities, n_bins=bad)
