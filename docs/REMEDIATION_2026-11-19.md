@@ -1,12 +1,12 @@
 # 2026-11-19 交叉审计修复记录
 
-对 `b33c8c7` 的 7 专家交叉全量审计所确认发现的修复。本文件是计划、SOP 与执行
+对 `525-baseline`（重写前基线，旧 SHA 已不可解析） 的 7 专家交叉全量审计所确认发现的修复。本文件是计划、SOP 与执行
 记录；`docs/OPTIMIZATION_PLAN.md` 是历史审计路线图，其原始缺陷证据保持不变。
 
 ## 1. 审计基线
 
 - 对象：`dit/` 全包 36 文件 8341 行 + `tests/` 5453 行。
-- 基线：全量 torch 套件 **525 passed**（4:43），工作树干净 @ `b33c8c7`。
+- 基线：全量 torch 套件 **525 passed**（4:43），工作树干净 @ `525-baseline`（重写前基线，旧 SHA 已不可解析）。
 - 方法：7 位专家并行独立审查（通用审查、第二意见、静默失败、类型设计、安全、
   简化、测试覆盖）+ 主审人逐文件亲读交叉仲裁；每条承重结论对照源码亲验，关键
   声明用 `.venv` 探针实测复现或推翻。
@@ -18,21 +18,21 @@
 
 | 阶段 | 提交 | 内容 | 验证 |
 |---|---|---|---|
-| C1 | `a76b5a9` | 标签契约根因：`raw_label_names()` 按 raw 编码选表；`_label_for` 只在视图标签集内解析；`task_view` 拒绝缺 NC/AD 与矛盾元数据 | 93 passed（4 项修复前红）+ 99 passed 影响面 |
-| C2 | `f6ee550` | 元数据可观测性：`summary()` 增加 `demographics_available`/`site_available`/`n_missing_site`；CLI 站点分析跳过时写显式 note | 75 passed |
-| C3 | `834358f` | 热图文件名白名单清洗（路径穿越）；`cmd_interpret` 拒绝 `--select`/`--covariate residualize`/`--control-view`；permutation importance 改 in-sample 口径；`node_matrix` docstring 对齐实现 | 34 interpret + 24 cli passed（8 项修复前红） |
-| C4 | `b8962de` | fetch 保留 URL query；`HTTPException`（IncompleteRead/InvalidURL）包装为 `FetchError`；deployment config 段缺失/不兼容包装为 `ValueError` | 77 + 26 passed |
-| C7 | `6b63db7` | `md_cell` 转义 Markdown 表格数据可控单元格（含 ablation 表）；`_csv_safe` 中和 CSV 公式注入 | 10 reporting + 26 cli passed |
-| C5 | `2cbd1d0` | `describe()` 保留显式 None（工件 config 往返与报告配置段双侧保真） | 27 plan + 113 deep/reporting passed |
-| C6 | `67a21d9` | `classification_metrics(binary_view=...)`：二分类 sens/spec 块仅对二分类视图发射；11 个调用点同批；`is_binary_task` 单一别名权威 | 全量 595 passed（8 项修复前红；冻结规范门禁通过） |
-| C10 | `178e89d` | README 选择器描述改为 L1 弹性网（原误作 ANOVA F 检验）；cingulum 区间争议标注待证（检索无可核验来源，代码保持现状） | 文档一致性 |
-| C11 | `4107688` | 删除零引用死代码 8 处（make_pipeline、_apply_residualizer、to_fold_dicts、apply_policy、threshold_sweep、has_new_logistic_api、expected_feature_count、VALID_VIEWS）+ 内联 identity wrapper `experiment_payload_of_base` 的调用点 + 4 个未用导入（其函数定义直至 R4b 才真正删除——三处 commit message 曾先后声称已删，属「声称已修实则未修」，见 R4b 行）；`evaluate_classical`/`evaluate_metric_ensemble`/`TractFeaturePreprocessor` 加 docstring 警告（公开 API 删除留待用户裁决） | 120 + 86 passed |
-| C8 | `fab3172` | `paired_fold_comparison` 15 条拒绝路径全参数化钉住（含正控制防空过） | 39 passed |
-| C9 | `10898af` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
-| R1 | `950b08a` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
-| R2 | `3ea66c6`..`e31e3bf` | 6 专家交叉复审处置：删两具清理残留尸体；binary_view 接线/LOSO 缺 AD 折/OOF 守卫三承重测试（变异实测杀死）；deployment 全段 ValueError 包装；CSV 类名列消毒；interpret 拒绝 `--alignment`；md_cell 加 caveats；热图截断/大小写折叠/metric 配对；`predict_unlabeled` 经 classes_ 映射；ExperimentConfig 值类型守卫；`tests/test_config.py` 首个 config loader 测试 | 657 passed |
+| C1 | `7310f80` | 标签契约根因：`raw_label_names()` 按 raw 编码选表；`_label_for` 只在视图标签集内解析；`task_view` 拒绝缺 NC/AD 与矛盾元数据 | 93 passed（4 项修复前红）+ 99 passed 影响面 |
+| C2 | `47970a0` | 元数据可观测性：`summary()` 增加 `demographics_available`/`site_available`/`n_missing_site`；CLI 站点分析跳过时写显式 note | 75 passed |
+| C3 | `8031aac` | 热图文件名白名单清洗（路径穿越）；`cmd_interpret` 拒绝 `--select`/`--covariate residualize`/`--control-view`；permutation importance 改 in-sample 口径；`node_matrix` docstring 对齐实现 | 34 interpret + 24 cli passed（8 项修复前红） |
+| C4 | `f6fcb80` | fetch 保留 URL query；`HTTPException`（IncompleteRead/InvalidURL）包装为 `FetchError`；deployment config 段缺失/不兼容包装为 `ValueError` | 77 + 26 passed |
+| C7 | `d34f256` | `md_cell` 转义 Markdown 表格数据可控单元格（含 ablation 表）；`_csv_safe` 中和 CSV 公式注入 | 10 reporting + 26 cli passed |
+| C5 | `f7fb2bc` | `describe()` 保留显式 None（工件 config 往返与报告配置段双侧保真） | 27 plan + 113 deep/reporting passed |
+| C6 | `ebce98c` | `classification_metrics(binary_view=...)`：二分类 sens/spec 块仅对二分类视图发射；11 个调用点同批；`is_binary_task` 单一别名权威 | 全量 595 passed（8 项修复前红；冻结规范门禁通过） |
+| C10 | `b7d4897` | README 选择器描述改为 L1 弹性网（原误作 ANOVA F 检验）；cingulum 区间争议标注待证（检索无可核验来源，代码保持现状） | 文档一致性 |
+| C11 | `8bd3ee2` | 删除零引用死代码 8 处（make_pipeline、_apply_residualizer、to_fold_dicts、apply_policy、threshold_sweep、has_new_logistic_api、expected_feature_count、VALID_VIEWS）+ 内联 identity wrapper `experiment_payload_of_base` 的调用点 + 4 个未用导入（其函数定义直至 R4b 才真正删除——三处 commit message 曾先后声称已删，属「声称已修实则未修」，见 R4b 行）；`evaluate_classical`/`evaluate_metric_ensemble`/`TractFeaturePreprocessor` 加 docstring 警告（公开 API 删除留待用户裁决） | 120 + 86 passed |
+| C8 | `2ce6418` | `paired_fold_comparison` 15 条拒绝路径全参数化钉住（含正控制防空过） | 39 passed |
+| C9 | `2b711b2` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
+| R1 | `594cbc1` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
+| R2 | `7874987`..`c359de2` | 6 专家交叉复审处置：删两具清理残留尸体；binary_view 接线/LOSO 缺 AD 折/OOF 守卫三承重测试（变异实测杀死）；deployment 全段 ValueError 包装；CSV 类名列消毒；interpret 拒绝 `--alignment`；md_cell 加 caveats；热图截断/大小写折叠/metric 配对；`predict_unlabeled` 经 classes_ 映射；ExperimentConfig 值类型守卫；`tests/test_config.py` 首个 config loader 测试 | 657 passed |
 | R3 | 本轮 | R2 diff 的 3 专家复审 + P3 积压清理：stdout reports tuple 回归（R2 引入，已修）；markdown config 块与 `write_json` 统一 `_json_safe`；`ThresholdPolicy` 构造校验 + `_MAX_PASSES` 命名；`smooth_profiles`/`label_map` docstring 对齐实现；`_choose_axis` 拒绝多轴歧义；Windows 保留名防御；fold 权重回退标记键；导出面补全；`prepare_matrix` 形态统一；summary 列序与 per_site 语义钉扎；`md_cell` 覆盖全部 Python 行分隔符；`threshold_criterion` tuple 成员测试；config.py 非映射 experiment 与混合键排序；deployment label_map 键/classes 强转/不变量校验；savefig 失败清理半写文件；ruff 工具链（F821/F841/E9）入 dev extras 并全绿 | 最终计数见 §5 |
-| R4 | 本轮（核查） | 4 位证伪型专家核验终报：5/7 声明完全属实；失实项集中在元陈述（例外清单漏列 C12 删除的 10 个测试函数、日志悬空 sha `7c7428b`、过时计数、README 测试数）——全部修正。真实代码发现：`enable_selection` 漏出 bool 守卫（P2，YAML 字符串静默开启选择）；`_fold_table` 白名单静默丢弃 5 个真实折诊断键（不变量守护员 R1）——改为规范键优先 + 其余键透传（契约反转已在其测试中声明）；deployment 空 classes 对/超大 int/数字字符串键碰撞；savefig 清理失败吞错；`_choose_axis` 文档如实化 + point 轴消息名词。`write_json` 的 NaN→null 取舍与其余 P3 记入 §4 未决清单 | 见 §5 |
+| R4 | 本轮（核查） | 4 位证伪型专家核验终报：5/7 声明完全属实；失实项集中在元陈述（例外清单漏列 C12 删除的 10 个测试函数、日志悬空 sha `(amend 前孤儿，已由 7874987 取代)`、过时计数、README 测试数）——全部修正。真实代码发现：`enable_selection` 漏出 bool 守卫（P2，YAML 字符串静默开启选择）；`_fold_table` 白名单静默丢弃 5 个真实折诊断键（不变量守护员 R1）——改为规范键优先 + 其余键透传（契约反转已在其测试中声明）；deployment 空 classes 对/超大 int/数字字符串键碰撞；savefig 清理失败吞错；`_choose_axis` 文档如实化 + point 轴消息名词。`write_json` 的 NaN→null 取舍与其余 P3 记入 §4 未决清单 | 见 §5 |
 
 > R4 覆盖缺口（如实记录）：第 4 位证伪型审查（过度声明审查）首轮因会话中断未返回，已重派并补跑；其余 3 位（声明证伪、对抗探针、不变量守护）报告完整。
 
@@ -66,7 +66,7 @@
 - **cingulum 区间**：代码 1–10 与 USAGE 40–60 矛盾且均无可核验来源；代码保持
   现状，USAGE 标注争议。取得可引用来源前，扣带回 `literature_hits` 命中结论
   不应单独作为证据。
-- **C12（已执行，`dca888a`）**：删除了 `evaluate_classical`/
+- **C12（已执行，`a8fcf41`）**：删除了 `evaluate_classical`/
   `evaluate_metric_ensemble`（~190 行，仅测试驱动、无 `_require_inner_class_support`
   守卫）与 `TractFeaturePreprocessor` 公开导出及类（全量统计 API，泄漏诱骗器）；
   `runner.py` 仅保留 `EvaluationResult` 契约。连带移除 10 个测试函数（无参数化；C12 commit message 的「9 函数（10 用例）」为计数错误，以本行为准）

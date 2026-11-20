@@ -505,16 +505,8 @@ def _results_table(results: list[dict[str, object]]) -> str:
                 auc=num_cell(aggregate.get("roc_auc")),
                 f1=num_cell(aggregate.get("macro_f1")),
                 bal=num_cell(aggregate.get("balanced_accuracy")),
-                sens=(
-                    f"{float(aggregate['sensitivity']):.3f}"
-                    if aggregate.get("sensitivity") is not None
-                    else "-"
-                ),
-                spec=(
-                    f"{float(aggregate['specificity']):.3f}"
-                    if aggregate.get("specificity") is not None
-                    else "-"
-                ),
+                sens=num_cell(aggregate.get("sensitivity")),
+                spec=num_cell(aggregate.get("specificity")),
                 nfolds=len(folds),
             )
         )

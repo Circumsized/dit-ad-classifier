@@ -170,7 +170,13 @@ def fold_macro_summary(
         values = [
             np.nan if fold.get(metric) is None else float(fold[metric])
             for fold in comparable
-            if metric in fold and np.isfinite(float(fold[metric]))
+            # The None check must run inside the filter: the value expression
+            # below it calls float() on the recorded value, so an explicit
+            # None (metric recorded but not computable) would raise
+            # TypeError before the NaN mapping ever applies.
+            if metric in fold
+            and fold[metric] is not None
+            and np.isfinite(float(fold[metric]))
         ]
         if not values:
             per_metric[metric] = {"mean": None, "median": None, "min": None, "max": None}

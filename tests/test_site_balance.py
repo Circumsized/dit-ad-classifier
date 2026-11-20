@@ -329,3 +329,16 @@ class TestPerSiteMetricsSemantics:
         import json
 
         json.dumps(rows, allow_nan=False)
+
+
+def test_fold_macro_summary_accepts_explicit_none_metric() -> None:
+    # f0ce052's value expression mapped None to NaN, but the filter called
+    # float(None) first and crashed -- the fix was dead code. The None check
+    # must run inside the filter so a recorded-but-not-computable metric is
+    # treated as unrecorded instead of raising.
+    reports = [
+        {"fold": "0", "accuracy": 0.8, "balanced_accuracy": 0.8, "macro_f1": 0.8},
+        {"fold": "1", "accuracy": None, "balanced_accuracy": 0.6, "macro_f1": 0.7},
+    ]
+    summary = fold_macro_summary(reports, metrics=("accuracy",))
+    assert summary["per_metric"]["accuracy"]["mean"] == pytest.approx(0.8)

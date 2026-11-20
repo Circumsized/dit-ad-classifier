@@ -82,8 +82,9 @@ canonical 编码         y ∈ {0,1,2}      0=NC, 1=MCI, 2=AD
 | `site_stratified_kfold_indices` | 逐中心轮转，余数均摊 | 站点构成受控的鲁棒估计 |
 | `leave_one_site_out` | 整中心留出，按站点标识排序 | 零样本跨中心迁移 |
 
-公共约束：折数不得超过最小类别数（缺类折的指标不可比，直接拒绝）；站点分割要求
-整数编码且无 -1。统一入口 `split_indices` 产出 `(train, test, fold_id)`。
+公共约束：类分层折数不得超过最小类别数，站点分层折数不得超过最小站点规模
+（各自直接拒绝——缺类/缺站折的指标不可比）；LOSO 无折数参数，折数即站点数；
+站点分割要求整数编码且无 -1。统一入口 `split_indices` 产出 `(train, test, fold_id)`。
 
 ---
 
@@ -183,7 +184,7 @@ Transformer（缺失束以 key padding mask 置 -∞）+ cls/mean/attention 池�
 | MMD | 多核 RBF 均值差 | 核带宽 (0.5,1,2,4) |
 | DANN | 判别器 + 梯度反转 | 对抗式 |
 
-对齐在 epoch 级子样本上计算而非 batch 级：小 batch  rarely 同时含两个≥2 成员的
+对齐在 epoch 级子样本上计算而非 batch 级：小 batch 很少同时含两个≥2 成员的
 站点；强度按 ramp 线性爬升。域判别器以实际站点 ID 为多类目标。
 
 ### 6.4 概率校准
@@ -281,7 +282,7 @@ SHA-256、类别计数、fold_comparable、held_out_site、data_digest）；同�
 ### 10.2 SSRF 防护架构
 
 `dit/data/source.py`：scheme/端口白名单 → URL 凭据拒绝 → 主机名/字面量校验 →
-解析后逐地址公共性校验（34 个显式拒绝网段）→ socket 钉扎到已验证地址（防 DNS
+解析后逐地址公共性校验（31 个显式拒绝网段）→ socket 钉扎到已验证地址（防 DNS
 重绑定 TOCTOU）→ 逐跳重验（5 跳上限）→ 流式体积上限。解析器可注入，使策略可在
 无网络环境完整测试。
 

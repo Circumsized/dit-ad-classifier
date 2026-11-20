@@ -22,6 +22,8 @@ from dit.evaluation.reporting import (
     _fold_table,
     assemble_report,
     build_covariate_ablation_comparisons,
+    md_cell,
+    num_cell,
     render_markdown,
     write_json,
 )
@@ -544,3 +546,11 @@ def test_markdown_json_blocks_sanitise_non_finite_values() -> None:
     rendered = render_markdown(payload)
     assert "NaN" not in rendered
     assert '"missing_fraction": null' in rendered
+
+
+def test_num_cell_renders_non_finite_as_dash() -> None:
+    # The NaN/inf branch is depth-defence for callers that bypass _json_safe;
+    # without it a mutation deleting the branch would go unnoticed.
+    assert num_cell(float("nan")) == "-"
+    assert num_cell(float("inf")) == "-"
+    assert num_cell(-float("inf")) == "-"
