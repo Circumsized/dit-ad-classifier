@@ -70,46 +70,53 @@ def environment_fingerprint(seed: int | None = None) -> dict[str, object]:
 
 def _fold_table(result) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    # Canonical columns first so the report stays diffable; every other key a
+    # runner recorded is passed through below.  An explicit allowlist here
+    # silently dropped real diagnostics (inner_best_score, inner_budget,
+    # residualizer, epochs_requested, weighting_fallback) -- the opposite of
+    # the project's "never silently drop provenance" rule.
+    ordered = (
+        "fold",
+        "n_train",
+        "n_test",
+        "accuracy",
+        "balanced_accuracy",
+        "macro_f1",
+        "sensitivity",
+        "specificity",
+        "roc_auc",
+        "ece",
+        "brier_score",
+        "best_params",
+        "tuning_score",
+        "inner_best_score",
+        "inner_cv",
+        "inner_budget",
+        "training",
+        "alignment_grid",
+        "weights",
+        "weighting_fallback",
+        "base_models",
+        "confusion_matrix",
+        "n_features_used",
+        "residualizer",
+        "selection",
+        "task",
+        "split_strategy",
+        "test_index_digest",
+        "data_digest",
+        "test_class_counts",
+        "held_out_site",
+        "fold_comparable",
+    )
     for fold in result.folds:
         row: dict[str, object] = {
-            "fold": fold.get("fold"),
-            "n_train": fold.get("n_train"),
-            "n_test": fold.get("n_test"),
-            "accuracy": fold.get("accuracy"),
-            "balanced_accuracy": fold.get("balanced_accuracy"),
-            "macro_f1": fold.get("macro_f1"),
-            "sensitivity": fold.get("sensitivity"),
-            "specificity": fold.get("specificity"),
-            "roc_auc": fold.get("roc_auc"),
-            "ece": fold.get("ece"),
-            "brier_score": fold.get("brier_score"),
+            key: fold.get(key) for key in ordered if fold.get(key) is not None
         }
-        # Fit provenance for auditing ensembles: ``weights`` and
-        # ``base_models`` carry the per-fold ensemble composition, including
-        # whether a deep member was calibrated.
-        for key in (
-            "best_params",
-            "tuning_score",
-            "inner_cv",
-            "training",
-            "alignment_grid",
-            "weights",
-            "base_models",
-            "confusion_matrix",
-            "n_features_used",
-            "task",
-            "split_strategy",
-            "test_index_digest",
-            "data_digest",
-            "test_class_counts",
-            "held_out_site",
-            "fold_comparable",
-            "selection",
-        ):
-            value = fold.get(key)
-            if value is not None:
+        for key, value in fold.items():
+            if key not in row and value is not None:
                 row[key] = value
-        rows.append({key: value for key, value in row.items() if value is not None})
+        rows.append(row)
     return rows
 
 
@@ -211,7 +218,12 @@ def assemble_report(
             "feature_view": result.feature_view,
             "aggregate": result.aggregate,
             "fold_metric_spread": {
-                metric: pairwise_fold_delta([float(fold.get(metric, np.nan)) for fold in result.folds])
+                metric: pairwise_fold_delta(
+                    [
+                        np.nan if fold.get(metric) is None else float(fold[metric])
+                        for fold in result.folds
+                    ]
+                )
                 for metric in ("accuracy", "balanced_accuracy", "macro_f1")
                 if all(metric in fold for fold in result.folds)
             },
@@ -253,8 +265,12 @@ def result_key(result) -> str:
 def _json_safe(value: object) -> object:
     """Replace non-finite floats before strict JSON serialization.
 
-    Unavailable metrics become JSON ``null`` instead of the non-standard
-    ``NaN`` token. Scalar and container types are preserved recursively.
+    Semantics at the file boundary: a non-finite number (NaN/inf from a
+    computed metric) becomes JSON ``null`` with its key present; a key that
+    was never recorded (explicit ``None`` in a fold report) is dropped by the
+    table builders and is simply absent. A reader can therefore tell "the
+    metric was computed and came out non-finite" from "the metric was not
+    recorded". Scalar and container types are preserved recursively.
     """
 
     if isinstance(value, np.bool_):
@@ -282,8 +298,12 @@ def write_json(path: str | Path, payload: dict[str, object]) -> Path:
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    # _json_safe here, not at each call site: an ablation row or a report
+    # section that grows a non-finite float must land as null, not crash
+    # strict serialisation with an opaque ValueError.
     target.write_text(
-        json.dumps(payload, indent=2, sort_keys=False, allow_nan=False), encoding="utf-8"
+        json.dumps(_json_safe(payload), indent=2, sort_keys=False, allow_nan=False),
+        encoding="utf-8",
     )
     return target
 
@@ -300,7 +320,7 @@ def render_markdown(payload: dict[str, object]) -> str:
         "## Configuration",
         "",
         "```json",
-        json.dumps(config, indent=2),
+        json.dumps(_json_safe(config), indent=2, allow_nan=False),
         "```",
         "",
         "## Dataset",
@@ -358,8 +378,48 @@ def write_markdown(path: str | Path, payload: dict[str, object]) -> Path:
     return target
 
 
+# Report tables are the one place data-controlled strings are interpolated
+# into Markdown structure (feature views can be .mat metric names, result
+# keys embed model names), so cell metacharacters are neutralised there.
+# JSON blocks need no equivalent: they are fenced and dumps-escaped.
+_MD_CELL_ESCAPES = str.maketrans(
+    {
+        # The backslash first: it is the escape character itself, and leaving
+        # it raw lets a renderer that parses \\ before \| read the escaped
+        # pipe back as a structural one.
+        "\\": "\\\\",
+        "|": r"\|",
+        "`": r"\`",
+        "<": "&lt;",
+        ">": "&gt;",
+        "[": r"\[",
+        "]": r"\]",
+        "\n": " ",
+        "\r": " ",
+        # Every separator str.splitlines() honours, not just \n/\r: a caveat
+        # that only smuggles \u2028 would forge a heading for any consumer
+        # that walks the report by Python line semantics.
+        "\v": " ",
+        "\f": " ",
+        "\x1c": " ",
+        "\x1d": " ",
+        "\x1e": " ",
+        "\x85": " ",
+        "\u2028": " ",
+        "\u2029": " ",
+    }
+)
+
+
+def md_cell(value: object) -> str:
+    """Render one value as a Markdown table cell with metacharacters escaped."""
+    return str(value).translate(_MD_CELL_ESCAPES)
+
+
 def _json_block(value: object) -> str:
-    return "```json\n" + json.dumps(value, indent=2, allow_nan=False) + "\n```"
+    # Same boundary as write_json: non-finite floats become null rather than
+    # crashing the Markdown render half-way through a report.
+    return "```json\n" + json.dumps(_json_safe(value), indent=2, allow_nan=False) + "\n```"
 
 
 def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
@@ -375,20 +435,27 @@ def _paired_comparisons_table(comparisons: list[dict[str, object]]) -> str:
         mean = comparison.get("mean_delta")
         lines.append(
             "| {reference} | {candidate} | {metric} | {pairs} | {mean} | {raw} | {holm} | {status} |".format(
-                reference=comparison.get("reference", "-"),
-                candidate=comparison.get("candidate", "-"),
-                metric=comparison.get("metric", "-"),
+                reference=md_cell(comparison.get("reference", "-")),
+                candidate=md_cell(comparison.get("candidate", "-")),
+                metric=md_cell(comparison.get("metric", "-")),
                 pairs=comparison.get("n_pairs", 0),
                 mean="-" if mean is None else format(float(mean), "+.4f"),
                 raw="-" if raw_p is None else format(float(raw_p), ".4f"),
                 holm="-" if holm_p is None else format(float(holm_p), ".4f"),
-                status=comparison.get("status", "unknown"),
+                status=md_cell(comparison.get("status", "unknown")),
             )
         )
-        for caveat in comparison.get("caveats", []):
-            lines.append(f"> {caveat}")
+        # Caveats and reasons reach the report through this public API, so
+        # they get the same cell escaping as the table: an unescaped newline
+        # in a caller-supplied string would forge headings and tables.
+        caveats = comparison.get("caveats") or []
+        if isinstance(caveats, str) or not isinstance(caveats, (list, tuple)):
+            # A bare string would iterate one character per blockquote line.
+            caveats = [str(caveats)]
+        for caveat in caveats:
+            lines.append(f"> {md_cell(caveat)}")
         if comparison.get("reason"):
-            lines.append(f"> {comparison['reason']}")
+            lines.append(f"> {md_cell(comparison['reason'])}")
     return "\n".join(lines)
 
 
@@ -403,16 +470,19 @@ def _results_table(results: list[dict[str, object]]) -> str:
         aggregate = entry["aggregate"]
         folds = entry.get("folds", [])
         lines.append(
-            "| {model} | {task} | {split} | {view} | {acc:.3f} | {auc} | {f1:.3f} | "
-            "{bal:.3f} | {sens} | {spec} | {nfolds} |".format(
-                model=entry["model"],
-                task=entry["task"],
-                split=entry["split_strategy"],
-                view=entry["feature_view"],
-                acc=float(aggregate["accuracy"]),
+            "| {model} | {task} | {split} | {view} | {acc} | {auc} | {f1} | "
+            "{bal} | {sens} | {spec} | {nfolds} |".format(
+                model=md_cell(entry["model"]),
+                task=md_cell(entry["task"]),
+                split=md_cell(entry["split_strategy"]),
+                view=md_cell(entry["feature_view"]),
+                # null (non-finite metric) renders as "-" here; a bare
+                # float(None) would crash the Markdown after the JSON was
+                # already written.
+                acc=(f"{float(aggregate['accuracy']):.3f}" if aggregate.get("accuracy") is not None else "-"),
                 auc=(f"{float(aggregate['roc_auc']):.3f}" if aggregate.get("roc_auc") is not None else "-"),
-                f1=float(aggregate["macro_f1"]),
-                bal=float(aggregate["balanced_accuracy"]),
+                f1=(f"{float(aggregate['macro_f1']):.3f}" if aggregate.get("macro_f1") is not None else "-"),
+                bal=(f"{float(aggregate['balanced_accuracy']):.3f}" if aggregate.get("balanced_accuracy") is not None else "-"),
                 sens=(
                     f"{float(aggregate['sensitivity']):.3f}"
                     if aggregate.get("sensitivity") is not None

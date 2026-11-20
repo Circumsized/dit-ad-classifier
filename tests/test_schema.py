@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from dit.data.schema import DatasetBundle, canonicalize_labels
+from dit.data.schema import DatasetBundle, canonicalize_labels, raw_label_names
 from dit.data.synthetic import make_synthetic_bundle
 
 
@@ -211,3 +211,116 @@ class TestDatasetBundle:
         assert len(summary["label_counts"]) == 3
         assert len(summary["site_counts"]) == 5
         assert 0.0 <= float(summary["missing_fraction"]) <= 1.0
+
+    def test_summary_reports_metadata_presence(self) -> None:
+        # A MAT file without the population/site keys degrades to all-NaN
+        # demographics and all-(-1) sites; the report must be able to say so.
+        complete = make_synthetic_bundle(n_samples=30, n_sites=3)
+        summary = complete.summary()
+        assert summary["demographics_available"] is True
+        assert summary["site_available"] is True
+        assert summary["n_missing_site"] == 0
+
+        missing = DatasetBundle(
+            X=complete.X,
+            y=complete.y,
+            age=np.full(30, np.nan),
+            site=np.full(30, -1, dtype=np.int64),
+        )
+        degraded = missing.summary()
+        assert degraded["demographics_available"] is False
+        assert degraded["site_available"] is False
+        assert degraded["n_missing_site"] == 30
+
+        partial = DatasetBundle(X=complete.X, y=complete.y, site=np.array([0] * 27 + [-1] * 3))
+        assert partial.summary()["n_missing_site"] == 3
+        assert partial.summary()["site_available"] is True
+
+
+class TestRawLabelNames:
+    """The naming table follows the coding the source file actually used."""
+
+    def test_official_keys_use_the_official_table(self) -> None:
+        assert raw_label_names({1: 0, 3: 1}) == {0: "NC", 1: "AD"}
+
+    def test_canonical_keys_use_the_canonical_table(self) -> None:
+        assert raw_label_names({0: 0, 2: 1}) == {0: "NC", 1: "AD"}
+
+    def test_single_official_key_is_read_as_official(self) -> None:
+        # AI4AD files code 1/2/3, so a lone 2 is MCI, not AD.
+        assert raw_label_names({2: 0}) == {0: "MCI"}
+
+    def test_unknown_keys_are_skipped(self) -> None:
+        assert raw_label_names({7: 0}) == {}
+
+
+class TestLabelNameResolution:
+    """Names resolve only against labels that exist, and only from the
+    bundle's own coding: an unnamed binary source must fail loudly instead of
+    silently becoming a single-class view."""
+
+    def _bundle(
+        self,
+        y: list[int],
+        *,
+        class_labels: dict[int, str] | None = None,
+        raw_label_map: dict[int, int] | None = None,
+    ) -> DatasetBundle:
+        return DatasetBundle(
+            X=np.zeros((len(y), 2, 3, 1), dtype=np.float32),
+            y=np.asarray(y, dtype=np.int64),
+            class_labels=class_labels,
+            raw_label_map=raw_label_map or {},
+        )
+
+    def test_unnamed_binary_source_is_refused(self) -> None:
+        # Without names, 1 could be MCI (three-class subset) or AD (binary);
+        # guessing produced an all-NC "binary" view.
+        bundle = self._bundle([0, 0, 0, 1, 1, 1])
+        assert bundle.label_map == {0: "NC", 1: "MCI"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+    def test_unnamed_mci_ad_source_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            self._bundle([1, 1, 2, 2]).task_view("binary")
+
+    def test_unnamed_nc_ad_source_is_accepted(self) -> None:
+        binary = self._bundle([0, 2, 0, 2]).task_view("binary")
+        assert binary.n_samples == 4
+        assert binary.y.tolist() == [0, 1, 0, 1]
+        assert binary.label_map == {0: "NC", 1: "AD"}
+
+    def test_named_mci_ad_source_is_refused(self) -> None:
+        bundle = self._bundle([0, 0, 1, 1], class_labels={0: "MCI", 1: "AD"})
+        assert bundle.label_map == {0: "MCI", 1: "AD"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+    def test_single_class_source_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            self._bundle([0, 0, 0]).task_view("binary")
+
+    def test_reference_and_disease_may_not_collapse(self) -> None:
+        # Contradictory metadata: canonical 0 is named NC, but the official
+        # table names the same canonical label AD. One label cannot be both.
+        bundle = self._bundle([0, 0, 0], class_labels={0: "NC"}, raw_label_map={3: 0})
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+
+class TestDisplayFallbackFollowsTheSourceCoding:
+    """label_map/class_names resolve the same way _label_for does."""
+
+    def test_partial_names_fall_back_to_the_raw_coding(self) -> None:
+        # class_labels names canonical 0; canonical 1 is only named by the
+        # source coding (official 2=MCI), so the display must not rename it
+        # through the canonical default table.
+        bundle = DatasetBundle(
+            X=np.zeros((4, 2, 3, 1), dtype=np.float32),
+            y=np.array([0, 0, 1, 1], dtype=np.int64),
+            class_labels={0: "Healthy"},
+            raw_label_map={1: 0, 2: 1},
+        )
+        assert bundle.label_map == {0: "Healthy", 1: "MCI"}
+        assert bundle.class_names == ("Healthy", "MCI")

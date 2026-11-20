@@ -50,6 +50,42 @@ def canonicalize_labels(labels: Iterable[int]) -> tuple[np.ndarray, dict[int, in
     return np.asarray([mapping[int(value)] for value in values], dtype=np.int64), mapping
 
 
+def raw_label_names(raw_label_map: Mapping[int, int]) -> dict[int, str]:
+    """Name each canonical label from the coding the source actually used.
+
+    The table is chosen by the raw keys: official AI4AD files code 1/2/3 and
+    already-canonical files code 0/1/2. Naming a canonical file with the
+    official table shifts every class by one, so a 0/1/2 file would lose its
+    AD class and report two classes called NC.
+
+    The raw-key test cannot separate a canonical {1, 2} file (MCI+AD) from an
+    official {1, 2} file (NC+MCI); official wins, matching the AI4AD
+    convention. A canonical two-class file without NC is therefore named
+    NC/MCI unless the caller passes explicit ``class_labels`` -- a binary view
+    still fails loudly, but a multiclass report would carry the shifted names.
+    """
+
+    official = set(raw_label_map) <= {1, 2, 3}
+    table = LABEL_NAMES if official else CANONICAL_NAMES
+    return {
+        int(canonical): table[int(raw)]
+        for raw, canonical in raw_label_map.items()
+        if int(raw) in table
+    }
+
+
+# Task aliases DatasetBundle.task_view accepts for the two-class view.  The
+# binary family renumbers NC/AD to 0/1, which is the only situation where
+# "sensitivity"/"specificity" name a disease role rather than a class position.
+BINARY_TASK_ALIASES = frozenset({"binary", "ad_nc", "ad_vs_nc"})
+
+
+def is_binary_task(task: str) -> bool:
+    """True when ``task`` names the two-class NC-vs-AD view."""
+
+    return str(task).lower().replace("-", "_") in BINARY_TASK_ALIASES
+
+
 @dataclass(frozen=True)
 class DatasetBundle:
     """Validated AFQ dataset.
@@ -159,26 +195,29 @@ class DatasetBundle:
     def class_names(self) -> tuple[str, ...]:
         if self.y is None:
             return tuple()
-        names: list[str] = []
-        for label in sorted(np.unique(self.y).tolist()):
-            label = int(label)
-            if self.class_labels and label in self.class_labels:
-                names.append(str(self.class_labels[label]))
-            else:
-                names.append(CANONICAL_NAMES.get(label, str(label)))
-        return tuple(names)
+        return tuple(self.label_map[int(label)] for label in sorted(np.unique(self.y).tolist()))
 
     @property
     def label_map(self) -> dict[int, str]:
-        """Canonical label to display name, for every present class."""
+        """Canonical label to display name, for every present class.
+
+        Resolution order matches ``_label_for``: the bundle's own
+        ``class_labels`` first, then the coding its source file used
+        (:func:`raw_label_names`); any label neither covers falls back to the
+        canonical default table -- which is only faithful when the missing
+        label really is the canonical NC/MCI/AD position.
+        """
 
         result: dict[int, str] = {}
         if self.y is None:
             return result
+        derived = raw_label_names(self.raw_label_map)
         for label in sorted(np.unique(self.y).tolist()):
             label = int(label)
             if self.class_labels and label in self.class_labels:
                 result[label] = str(self.class_labels[label])
+            elif label in derived:
+                result[label] = derived[label]
             else:
                 result[label] = CANONICAL_NAMES.get(label, str(label))
         return result
@@ -213,15 +252,17 @@ class DatasetBundle:
         normalized = task.lower().replace("-", "_")
         if normalized in {"multiclass", "three_class", "3class", "all"}:
             return self
-        if normalized not in {"binary", "ad_nc", "ad_vs_nc"}:
+        if normalized not in BINARY_TASK_ALIASES:
             raise ValueError("task must be binary/ad_nc or multiclass")
 
         reference = self._label_for("NC")
         disease = self._label_for("AD")
-        if reference is None or disease is None:
+        if reference is None or disease is None or reference == disease:
             raise ValueError(
                 "binary view needs both an NC and an AD class; found "
-                f"{sorted(set(self.y.tolist()))}"
+                f"{sorted(set(self.y.tolist()))}; name the classes with "
+                "class_labels when the source coding is not official 1/2/3 "
+                "or canonical 0/1/2"
             )
         keep = np.isin(self.y, [reference, disease])
         selected = self.select(np.flatnonzero(keep))
@@ -233,18 +274,27 @@ class DatasetBundle:
         return selected
 
     def _label_for(self, name: str) -> int | None:
-        """Find the canonical label carrying a given class name."""
+        """Find the canonical label carrying a given class name.
 
+        Only labels present in ``y`` resolve, so a name backed by no subject
+        cannot fabricate a class. The canonical table is a default for
+        unnamed bundles only: ``class_labels`` is consulted first, then the
+        coding the source file used, and a missing name means the class is
+        absent rather than misnamed.
+        """
+
+        present = {int(label) for label in np.unique(self.y)} if self.y is not None else set()
         if self.class_labels:
             for label, label_name in self.class_labels.items():
-                if str(label_name) == name:
+                if str(label_name) == name and int(label) in present:
                     return int(label)
-        for raw, canonical in self.raw_label_map.items():
-            if LABEL_NAMES.get(int(raw)) == name:
+        for canonical, label_name in raw_label_names(self.raw_label_map).items():
+            if label_name == name and canonical in present:
                 return int(canonical)
-        for label, label_name in CANONICAL_NAMES.items():
-            if label_name == name:
-                return int(label)
+        if not self.class_labels and not self.raw_label_map:
+            for label, label_name in CANONICAL_NAMES.items():
+                if label_name == name and label in present:
+                    return int(label)
         return None
 
     @property
@@ -298,4 +348,17 @@ class DatasetBundle:
                 else None
             ),
             "missing_fraction": float(np.mean(~self.mask)),
+            # Presence flags, not values: a MAT file without the population or
+            # site keys silently becomes all-NaN age/sex and all-(-1) sites,
+            # and without these fields no report could tell that from a real
+            # measurement gap.
+            "demographics_available": bool(
+                self.age is not None and bool(np.any(np.isfinite(self.age)))
+            ),
+            "site_available": bool(
+                self.site is not None and bool(np.any(self.site >= 0))
+            ),
+            "n_missing_site": (
+                int(np.sum(self.site == -1)) if self.site is not None else 0
+            ),
         }

@@ -290,7 +290,7 @@ class TestDomainAlignedClassifier:
 
     def test_normalisation_statistics_come_from_training_rows_only(self) -> None:
         profiles, labels, site = self._bundle()
-        train, test = profiles[:50], profiles[50:]
+        train, _test = profiles[:50], profiles[50:]
         # The centred value must match the mean over the training slice that
         # _split_indices actually keeps, not over every row handed to fit().
         classifier = DomainAlignedClassifier(SMALL)
@@ -745,7 +745,7 @@ class TestSiteGroupedSelection:
         )
         # Site-grouped selection is the Track-B (LOSO) protocol: stratified and
         # site-stratified outer folds must keep the class-stratified hold-out
-        # even when site labels exist, matching the classical path's _inner_cv
+        # even when site labels exist, matching the classical path's _inner_cv_for
         # rule.  Every synthetic site holds both classes, so LOSO engages it.
         assert site_report["inner_cv"] == "site_grouped"
         assert stratified_report["inner_cv"] == "class_stratified"

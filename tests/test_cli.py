@@ -9,6 +9,7 @@ directly rather than inferred from behaviour.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -172,7 +173,7 @@ def test_interpret_exports_the_panel_renderer() -> None:
     assert callable(render_metric_panel)
 
 
-def test_interpret_runs_end_to_end_on_profile_view(tmp_path) -> None:
+def test_interpret_runs_end_to_end_on_profile_view(tmp_path, capsys) -> None:
     """End-to-end regression: interpret extracts coefficients and exports heatmaps."""
 
     from dit.cli.main import main
@@ -196,6 +197,19 @@ def test_interpret_runs_end_to_end_on_profile_view(tmp_path) -> None:
     assert heatmaps_dir.is_dir()
     png_files = list(heatmaps_dir.glob("*.png"))
     assert len(png_files) > 0
+    # stdout's reports field is consumed as a list of paths: a stray tuple
+    # repr there breaks every script that parses the CLI output.
+    stdout = json.loads(capsys.readouterr().out)
+    for report in stdout["reports"]:
+        assert not report.startswith("("), report
+    # The interpret.json heatmaps block pairs each sanitised filename with
+    # the metric it came from, and every listed file exists.
+    payload = json.loads((tmp_path / "interpret.json").read_text(encoding="utf-8"))
+    assert payload["heatmaps"]
+    for entry in payload["heatmaps"]:
+        assert set(entry) == {"metric", "path"}
+        assert isinstance(entry["metric"], str) and entry["metric"]
+        assert (tmp_path / entry["path"]).exists()
 
 
 def test_version_flag_reports_the_package_version(capsys) -> None:
@@ -342,3 +356,96 @@ def test_ablation_writes_csv_and_strict_json(tmp_path) -> None:
     # The table JSON must be valid strict JSON (no bare NaN).
     table = json.loads((tmp_path / "ablation_table.json").read_text(encoding="utf-8"))
     assert len(table) == 3
+
+
+def test_missing_site_metadata_is_stated_not_silently_skipped() -> None:
+    # A MAT file without the site key becomes all-(-1). The site section must
+    # then carry a note saying the analysis was skipped, instead of vanishing
+    # from the report without a trace.
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _bundle
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig, run_experiment
+
+    bundle = make_synthetic_bundle(n_samples=40, n_sites=3, n_classes=3, seed=7)
+    result = run_experiment(
+        bundle,
+        ExperimentConfig(task="multiclass", n_splits=2, inner_splits=2, seed=7),
+    )
+    missing = replace(bundle, site=np.full(bundle.n_samples, -1, dtype=np.int64))
+    report = _bundle([result], missing, {"seed": 7})
+    assert report["site_composition"]["note"] == (
+        "site analysis skipped: site metadata contains missing (-1) values"
+    )
+    assert "per_site" not in report
+
+
+def test_csv_safe_neutralises_formula_prefixes() -> None:
+    from dit.cli.main import _csv_safe
+
+    for hostile in ('=HYPERLINK("http://x")', "+1", "-2", "@SUM(A1)", "\tTAB", "\rCR"):
+        assert _csv_safe(hostile) == "'" + hostile
+    for plain in ("sub-001", "0", "1.5", "NC"):
+        assert _csv_safe(plain) == plain
+
+
+def test_rad_scores_csv_prefixes_a_hostile_subject_id(tmp_path) -> None:
+    import csv
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _write_rad_scores
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig
+
+    bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=5)
+    bundle = replace(
+        bundle,
+        subject_id=np.array(["=cmd|' /C calc'!A0"] * 30 + ["+2"] * 30, dtype=object),
+    )
+    view = bundle.task_view("binary")
+    probabilities = np.tile([[0.9, 0.1], [0.2, 0.8]], (view.n_samples, 1))
+    result = SimpleNamespace(probabilities=probabilities, predictions=probabilities.argmax(axis=1))
+    path = _write_rad_scores(tmp_path, bundle, ExperimentConfig(task="binary"), result)
+    with path.open(encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    assert rows[0][0] == "subject_id"
+    assert rows[1][0] == "'=cmd|' /C calc'!A0"
+    assert "'+2" in {row[0] for row in rows[1:]}
+
+
+def test_rad_scores_csv_neutralises_hostile_class_names(tmp_path) -> None:
+    import csv
+    from dataclasses import replace
+
+    import numpy as np
+
+    from dit.cli.main import _write_rad_scores
+    from dit.data.synthetic import make_synthetic_bundle
+    from dit.evaluation.experiment import ExperimentConfig
+
+    # Class names come from the data file's coding and reach the CSV header
+    # and label columns; only subject_id used to be neutralised.
+    bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=6)
+    bundle = replace(
+        bundle,
+        class_labels={0: "=cmd|'/c calc'!A0", 1: "+1", 2: "-2"},
+    )
+    view = bundle.task_view("multiclass")
+    probabilities = np.tile([0.2, 0.3, 0.5], (view.n_samples, 1))
+    result = SimpleNamespace(
+        probabilities=probabilities, predictions=probabilities.argmax(axis=1)
+    )
+    path = _write_rad_scores(tmp_path, bundle, ExperimentConfig(task="multiclass"), result)
+    with path.open(encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    header = rows[0]
+    assert all(not cell.startswith(("=", "+", "-")) for cell in header), header
+    for row in rows[1:]:
+        assert not row[1].startswith(("=", "+", "-")), row
+        assert not row[2].startswith(("=", "+", "-")), row
+    assert header[-1] == "p_'-2"

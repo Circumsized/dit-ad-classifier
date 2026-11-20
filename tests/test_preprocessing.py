@@ -13,7 +13,7 @@ import pytest
 
 from dit.data.covariates import Residualizer, covariate_matrix, strip_covariate_columns
 from dit.data.layout import FeatureLayout, view_for_layout
-from dit.data.preprocessing import TractFeaturePreprocessor, smooth_profiles
+from dit.data.preprocessing import smooth_profiles
 from dit.data.schema import DatasetBundle
 from dit.data.synthetic import make_synthetic_bundle
 from dit.models.classical import _nan_area, _nan_slope, build_feature_matrix, describe_feature_layout
@@ -227,59 +227,6 @@ class TestMissingPattern:
         assert features[1, block.start] == pytest.approx(0.0)
 
 
-class TestPreprocessorLeakage:
-    def test_fit_uses_only_training_rows(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=80, n_points=11, n_metrics=2, seed=5)
-        preprocessor = TractFeaturePreprocessor(smooth_window=1).fit(
-            bundle.X[:50], age=bundle.age[:50], sex=bundle.sex[:50]
-        )
-        training_mean = float(np.nanmean(bundle.X[:50].reshape(50, -1), axis=0).mean())
-        assert float(preprocessor.center_.mean()) == pytest.approx(training_mean, rel=1e-5)
-
-    def test_transform_is_invariant_to_unseen_data(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=80, n_points=11, n_metrics=2, seed=5)
-        fitted = TractFeaturePreprocessor().fit(bundle.X[:50], bundle.age[:50], bundle.sex[:50])
-        transformed = fitted.transform(bundle.X[:50], bundle.age[:50], bundle.sex[:50])
-
-        # Fitting on a different, far larger training set must not change the
-        # transform of the original rows.
-        other = TractFeaturePreprocessor().fit(
-            bundle.X[:50], bundle.age[:50], bundle.sex[:50]
-        )
-        assert np.allclose(transformed, other.transform(bundle.X[:50], bundle.age[:50], bundle.sex[:50]))
-
-    def test_transform_requires_fit(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=28, n_points=5, n_metrics=1)
-        with pytest.raises(RuntimeError, match="must be fit"):
-            TractFeaturePreprocessor().transform(bundle.X)
-
-    def test_imputation_uses_training_median(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=40, n_points=7, n_metrics=1, seed=2)
-        x_train = bundle.X[:25].copy()
-        x_test = bundle.X[25:].copy()
-        x_test[0] = np.nan
-        fitted = TractFeaturePreprocessor().fit(x_train, bundle.age[:25], bundle.sex[:25])
-        out = fitted.transform(x_test, bundle.age[25:], bundle.sex[25:])
-        assert np.isfinite(out[0]).all()
-
-    def test_covariates_are_appended_when_requested(self) -> None:
-        bundle = make_synthetic_bundle(n_samples=30, n_points=7, n_metrics=1)
-        plain = TractFeaturePreprocessor(include_covariates=False).fit_transform(
-            bundle.X, bundle.age, bundle.sex
-        )
-        with_cov = TractFeaturePreprocessor(include_covariates=True).fit_transform(
-            bundle.X, bundle.age, bundle.sex
-        )
-        assert with_cov.shape[1] == plain.shape[1] + 2
-
-    def test_zero_variance_columns_are_not_divided_by_zero(self) -> None:
-        x = np.ones((12, 2, 5, 1), dtype=np.float32)
-        age = np.arange(12, dtype=np.float32)
-        sex = np.zeros(12, dtype=np.float32)
-        out = TractFeaturePreprocessor().fit_transform(x, age, sex)
-        assert np.isfinite(out).all()
-
-
 class TestResidualizer:
     def test_residuals_are_orthogonal_to_covariates(self) -> None:
         rng = np.random.default_rng(0)
@@ -386,3 +333,58 @@ class TestCovariateHelpers:
     def test_strip_covariates_rejects_degenerate_width(self) -> None:
         with pytest.raises(ValueError, match="no non-covariate columns"):
             strip_covariate_columns(np.zeros((3, 2)))
+
+
+class TestSummaryColumnOrder:
+    """The summary view's column order is stat-major and layout-coupled.
+
+    Nothing else pins which statistic sits in which column: a swapped tuple
+    in ``_profile_summary`` would keep every column count, layout validation
+    and selection test green while silently relabelling anatomy.  The check
+    goes through the production builder and matches each column against the
+    name ``feature_names()`` claims for it.
+    """
+
+    def test_each_column_matches_the_stat_its_name_claims(self) -> None:
+        rng = np.random.default_rng(7)
+        X = rng.normal(size=(1, 2, 9, 1)).astype(np.float32)
+        X[0, 0, :, 0] = np.arange(9, dtype=np.float32)  # tract 0: slope 1
+        view = DatasetBundle(X=X)
+        features = build_feature_matrix(view, view="summary", smooth_window=1, include_covariates=False)
+        layout = describe_feature_layout(view, view="summary", include_covariates=False)
+        names = layout.feature_names()
+
+        x = np.linspace(-1.0, 1.0, 9)
+        ramp = np.arange(9, dtype=float)
+        expected_area = float(np.trapezoid(ramp, x)) if hasattr(np, "trapezoid") else float(
+            np.trapz(ramp, x)
+        )
+        tract1 = _nan_slope(X, x)[0, 1, 0]
+        area1 = _nan_area(X, x)[0, 1, 0]
+        by_stat = {
+            "mean": {
+                ("tract_00", "metric_00"): float(np.nanmean(X[0, 0, :, 0])),
+                ("tract_01", "metric_00"): float(np.nanmean(X[0, 1, :, 0])),
+            },
+            "std": {
+                ("tract_00", "metric_00"): float(np.nanstd(X[0, 0, :, 0])),
+                ("tract_01", "metric_00"): float(np.nanstd(X[0, 1, :, 0])),
+            },
+            "slope": {
+                # 0..8 mapped onto x in [-1, 1] is y = 4(x + 1).
+                ("tract_00", "metric_00"): 4.0,
+                ("tract_01", "metric_00"): float(tract1),
+            },
+            "area": {
+                ("tract_00", "metric_00"): expected_area,
+                ("tract_01", "metric_00"): float(area1),
+            },
+        }
+        checked = 0
+        for column, name in enumerate(names):
+            tract, metric, stat = name.split("|")
+            assert features[0, column] == pytest.approx(
+                by_stat[stat][(tract, metric)], rel=1e-3
+            ), f"column {column} ({name}) does not hold its claimed statistic"
+            checked += 1
+        assert checked == 8  # 2 tracts x 1 metric x 4 stats

@@ -28,6 +28,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Coordinate descent over the per-class offsets usually converges in the
+# first two passes; the cap is a safety ceiling, not a tuning knob, and the
+# search is monotone so stopping early can only leave score on the table.
+_MAX_PASSES = 2
+
+
 GRIDS: dict[str, tuple[float, ...]] = {
     "f1": tuple(np.linspace(0.05, 0.95, 181).tolist()),
     "balanced": tuple(np.linspace(0.05, 0.95, 181).tolist()),
@@ -47,6 +53,20 @@ class ThresholdPolicy:
     class_ids: tuple[int, ...]
     criterion: str
     score: float
+
+    def __post_init__(self) -> None:
+        # A policy with mismatched columns indexes out of range on first use;
+        # refuse it at construction where the mistake was made.
+        if len(self.thresholds) != len(self.class_ids):
+            raise ValueError(
+                f"one threshold per class required: got {len(self.thresholds)} "
+                f"thresholds for {len(self.class_ids)} classes"
+            )
+        if len(self.class_ids) != len(set(self.class_ids)):
+            raise ValueError("class ids must not repeat")
+        for threshold in self.thresholds:
+            if not 0.0 <= float(threshold) <= 1.0:
+                raise ValueError(f"thresholds must be in [0, 1], got {threshold}")
 
     @property
     def n_classes(self) -> int:
@@ -174,7 +194,7 @@ def fit_threshold(
     if not np.isfinite(best_score):
         raise ValueError("threshold search produced no finite score")
 
-    for _pass in range(2):
+    for _pass in range(_MAX_PASSES):
         improved = False
         for index in range(len(ids)):
             current = offsets[index]
@@ -196,63 +216,3 @@ def fit_threshold(
     return ThresholdPolicy(tuple(offsets), tuple(ids), criterion, best_score)
 
 
-def apply_policy(policy: ThresholdPolicy, probabilities: np.ndarray) -> np.ndarray:
-    """Apply an already-fitted policy without selecting a new threshold."""
-
-    return policy.predict(probabilities)
-
-
-def threshold_sweep(
-    y: np.ndarray,
-    probabilities: np.ndarray,
-    criterion: str = "f1",
-    n_points: int = 33,
-) -> list[dict[str, float]]:
-    """Return sensitivity/specificity/F1 at a range of thresholds for plotting.
-
-    The sweep moves the disease-class operating point: a row is predicted
-    diseased when ``p_disease >= t``, otherwise it falls to the best remaining
-    class.  Sweeping one shared constant off every column would leave the
-    argmax -- and therefore every row of the table -- unchanged.
-    """
-
-    labels = np.asarray(y, dtype=int).reshape(-1)
-    prob = np.asarray(probabilities, dtype=float)
-    if prob.ndim != 2 or prob.shape[0] != labels.shape[0]:
-        raise ValueError("y and probabilities must describe the same non-empty rows")
-    if labels.size == 0:
-        raise ValueError("y cannot be empty")
-    classes = sorted(set(labels.tolist()))
-    if len(classes) < 2:
-        raise ValueError("threshold sweep needs at least two present classes")
-    if any(label < 0 or label >= prob.shape[1] for label in classes):
-        raise ValueError("probability matrix does not cover every label")
-    disease = max(classes)
-    other_columns = [column for column in classes if column != disease]
-    other_ids = np.asarray(other_columns, dtype=int)
-    grid = np.linspace(0.0, 1.0, n_points)
-    rows: list[dict[str, float]] = []
-    for candidate in grid:
-        fallback = other_ids[np.argmax(prob[:, other_columns], axis=1)]
-        predictions = np.where(prob[:, disease] >= candidate, disease, fallback)
-        tp, fp, fn, _ = _confusion(labels, predictions, disease)
-        support = tp + fn
-        recall = tp / support if support else float("nan")
-        tn = _tn(labels, predictions, disease)
-        specificity = tn / (tn + fp) if tn + fp else float("nan")
-        precision = tp / (tp + fp) if tp + fp else float("nan")
-        f1 = (
-            2 * precision * recall / (precision + recall)
-            if precision + recall
-            else float("nan")
-        )
-        rows.append(
-            {
-                "threshold": float(candidate),
-                "sensitivity": float(recall),
-                "specificity": float(specificity),
-                "f1_disease": float(f1),
-                "accuracy": float(np.mean(predictions == labels)),
-            }
-        )
-    return rows

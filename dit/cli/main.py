@@ -37,10 +37,10 @@ from dit.evaluation.reporting import (
     assemble_report,
     build_covariate_ablation_comparisons,
     environment_fingerprint,
+    md_cell,
     write_json,
     write_markdown,
 )
-from dit.evaluation.runner import EvaluationResult
 from dit.evaluation.site_balance import per_site_metrics, site_composition
 from dit.models.classical import (
     build_feature_matrix,
@@ -244,6 +244,12 @@ def _bundle(
             }
         except ValueError as exc:
             composition = {"note": f"site metadata is incomplete: {exc}"}
+    elif view.site is not None and view.y is not None:
+        # Skipping silently would hide that the report has no site analysis at
+        # all, which is exactly how a missing site key in the MAT file looks.
+        composition = {
+            "note": "site analysis skipped: site metadata contains missing (-1) values"
+        }
     return assemble_report(
         evaluations,
         dataset_summary=dataset.summary(),
@@ -293,6 +299,20 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _csv_safe(value: object) -> str:
+    """Neutralise spreadsheet formula injection in a data-controlled cell.
+
+    Every data-controlled cell gets this treatment: subject identifiers land
+    in the first column, and class names (from the data coding or the
+    artifact's label map) reach label cells and the ``p_{name}`` headers.  A
+    leading ``=``, ``+``, ``-``, ``@``, tab, CR or LF would otherwise be
+    evaluated as a formula by Excel/LibreOffice on open (CWE-1236).
+    """
+
+    text = str(value)
+    return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r", "\n"} else text
+
+
 def _write_rad_scores(
     out_dir: str | Path,
     dataset: DatasetBundle,
@@ -322,16 +342,16 @@ def _write_rad_scores(
     target.parent.mkdir(parents=True, exist_ok=True)
     columns = (
         ["subject_id", "true_label", "predicted_label", "disease_score"]
-        + [f"p_{name_of[c]}" for c in class_labels]
+        + [f"p_{_csv_safe(name_of[c])}" for c in class_labels]
     )
     with target.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(columns)
         for index in range(view.n_samples):
             row = [
-                str(subject_ids[index]),
-                name_of[int(labels[index])],
-                name_of[int(predictions[index])],
+                _csv_safe(subject_ids[index]),
+                _csv_safe(name_of[int(labels[index])]),
+                _csv_safe(name_of[int(predictions[index])]),
                 f"{float(probabilities[index, disease]):.6f}",
             ]
             row += [f"{float(probabilities[index, c]):.6f}" for c in class_labels]
@@ -412,12 +432,12 @@ def cmd_ablation(args: argparse.Namespace) -> int:
     payload = _bundle(
         payloads,
         dataset,
-        {"ablation": experiment_payload_of_base(base), **base},
+        {"ablation": base, **base},
         include_covariate_comparisons=True,
     )
     written = _write_all(args.out, payload, "ablation")
-    # Strict JSON so an out-of-range float raises instead of emitting a bare
-    # NaN that downstream parsers reject.
+    # Strict JSON with non-finite floats mapped to null (write_json runs
+    # _json_safe first), so a NaN metric cannot emit a bare NaN token.
     written.append(write_json(Path(args.out) / "ablation_table.json", rows))
     written.append(_write_ablation_csv(args.out, rows))
     _write_markdown_table(args.out, rows, written)
@@ -443,16 +463,29 @@ def _write_ablation_csv(out_dir: str | Path, rows: list[dict[str, object]]) -> P
     ]
     target = Path(out_dir) / "ablation_table.csv"
     target.parent.mkdir(parents=True, exist_ok=True)
+    # ``view`` can be a .mat metric name, so the string columns get the same
+    # formula-injection neutralisation as the subject-id columns; numeric
+    # columns are formatted floats and cannot start a formula.
+    numeric = {
+        "accuracy",
+        "balanced_accuracy",
+        "macro_f1",
+        "roc_auc",
+        "ece",
+        "aggregate_argmax_accuracy",
+        "threshold",
+    }
     with target.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key) for key in columns})
+            writer.writerow(
+                {
+                    key: row.get(key) if key in numeric else _csv_safe(row.get(key))
+                    for key in columns
+                }
+            )
     return target
-
-
-def experiment_payload_of_base(base: dict) -> dict[str, object]:
-    return base
 
 
 def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], written: list[Path]) -> None:
@@ -461,9 +494,9 @@ def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], wr
     for row in rows:
         lines.append(
             "| {model} | {view} | {cov} | {acc:.3f} | {bal:.3f} | {f1:.3f} | {auc} | {am:.3f} | {thr:.2f} |".format(
-                model=row["model"],
-                view=row["view"],
-                cov=row["covariate_strategy"],
+                model=md_cell(row["model"]),
+                view=md_cell(row["view"]),
+                cov=md_cell(row["covariate_strategy"]),
                 acc=float(row["accuracy"]),
                 bal=float(row["balanced_accuracy"]),
                 f1=float(row["macro_f1"]),
@@ -486,6 +519,32 @@ def cmd_interpret(args: argparse.Namespace) -> int:
 
     dataset = _load_dataset(args)
     config = _config_from_args(args)
+    if config.enable_selection:
+        raise ValueError(
+            "interpret does not support --select: block/node selection is a "
+            "fold-local evaluation step, and the interpretation path fits one "
+            "model on every labeled row. Run evaluate with --select for the "
+            "selection diagnostics."
+        )
+    if config.covariate_strategy == "residualize":
+        raise ValueError(
+            "interpret does not support --covariate residualize: residualisation "
+            "is fitted inside evaluation folds, and the interpretation path has "
+            "no folds. Use --covariate feature or none."
+        )
+    if config.control_view is not None:
+        raise ValueError(
+            f"interpret does not support --control-view {config.control_view!r}: "
+            "control views are evaluation inputs, and the interpretation path "
+            "explains one fitted model. Run evaluate with the control view."
+        )
+    if config.alignment != "none":
+        raise ValueError(
+            f"interpret does not support --alignment {config.alignment!r}: the "
+            "alignment loss is a training-time term of the profile Transformer, "
+            "and the interpretation path fits one classical model on every "
+            "labeled row. Run evaluate with a Transformer model."
+        )
     view = dataset.task_view(config.task)
     if view.y is None:
         raise SystemExit("interpretation requires labels")
@@ -533,11 +592,20 @@ def cmd_interpret(args: argparse.Namespace) -> int:
         "literature_hits": literature_hits(coefficients, layout),
         "environment": environment_fingerprint(config.seed),
     }
-    written = [write_json(out_dir / "interpret.json", payload)]
+    heatmaps: list[tuple[int, Path]] = []
     if layout.kind in {"profile", "metric"}:
         heatmaps = render_metric_panel(coefficients, layout, out_dir=out_dir / "heatmaps")
-        payload["heatmaps"] = [str(path) for path in heatmaps]
-        written = [write_json(out_dir / "interpret.json", payload)] + heatmaps
+        # Paired with the original metric name: the filename is a sanitised
+        # stem, so the path alone cannot say which metric it came from.
+        payload["heatmaps"] = [
+            {"metric": layout.metric_names[metric], "path": str(path)}
+            for metric, path in heatmaps
+        ]
+    # One write, after the heatmap key exists: writing twice serialised the
+    # whole payload a second time for no gain.
+    written = [write_json(out_dir / "interpret.json", payload)] + [
+        path for _, path in heatmaps
+    ]
     print(json.dumps({"top_predictors": coefficients[:5], "reports": [str(p) for p in written]}, indent=2))
     return 0
 
@@ -598,14 +666,14 @@ def cmd_predict(args: argparse.Namespace) -> int:
         writer = csv.writer(handle)
         writer.writerow(
             ["subject_id", "predicted_label", "predicted_class"]
-            + [f"p_{name}" for name in class_names]
+            + [f"p_{_csv_safe(name)}" for name in class_names]
         )
         for index in range(dataset.n_samples):
             writer.writerow(
                 [
-                    str(subject_ids[index]),
+                    _csv_safe(subject_ids[index]),
                     int(predictions[index]),
-                    outcome["predicted_names"][index],
+                    _csv_safe(outcome["predicted_names"][index]),
                     *[float(probabilities[index, column]) for column in range(len(class_names))],
                 ]
             )

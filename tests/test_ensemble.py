@@ -33,31 +33,34 @@ BASELINE = ExperimentConfig(
 
 class TestFoldWeights:
     def test_equal_weighting_is_uniform(self) -> None:
-        weights = _fold_weights([0.9, 0.1, 0.6], "equal")
+        weights, fallback = _fold_weights([0.9, 0.1, 0.6], "equal")
         assert np.allclose(weights, 1.0 / 3)
+        assert fallback is False
 
     def test_inner_score_weighting_is_normalised(self) -> None:
-        weights = _fold_weights([0.8, 0.4, 0.2], "inner_score")
+        weights, _ = _fold_weights([0.8, 0.4, 0.2], "inner_score")
         assert weights.sum() == pytest.approx(1.0)
         assert weights[0] > weights[1] > weights[2]
 
     def test_uninformative_models_get_no_weight(self) -> None:
-        weights = _fold_weights([0.5, 0.0, -0.2], "inner_score")
+        weights, _ = _fold_weights([0.5, 0.0, -0.2], "inner_score")
         assert weights[1] == 0.0
         assert weights[2] == 0.0
         assert weights[0] == pytest.approx(1.0)
 
     def test_all_uninformative_falls_back_to_equal(self) -> None:
-        weights = _fold_weights([0.0, -0.1, np.nan], "inner_score")
+        weights, fallback = _fold_weights([0.0, -0.1, np.nan], "inner_score")
         assert np.allclose(weights, 1.0 / 3)
+        assert fallback is True
 
     def test_nan_scores_do_not_contaminate(self) -> None:
-        weights = _fold_weights([0.6, np.nan], "inner_score")
+        weights, _ = _fold_weights([0.6, np.nan], "inner_score")
         assert np.isfinite(weights).all()
         assert weights.sum() == pytest.approx(1.0)
 
     def test_single_model_gets_full_weight(self) -> None:
-        assert _fold_weights([0.7], "inner_score").tolist() == [1.0]
+        weights, _ = _fold_weights([0.7], "inner_score")
+        assert weights.tolist() == [1.0]
 
 
 class TestEnsembleRun:

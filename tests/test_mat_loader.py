@@ -9,6 +9,7 @@ against a genuine MATLAB container rather than a hand-rolled dict.
 from __future__ import annotations
 
 import numpy as np
+from dataclasses import replace
 import pytest
 from scipy.io import savemat
 
@@ -236,6 +237,70 @@ class TestCellLayout:
         assert bundle.metric_names == ("FA",)
 
 
+class TestCanonicalLabelCoding:
+    """A file already coded 0/1/2 must be named with the canonical table.
+
+    Naming it with the official 1/2/3 table shifts every class by one: the
+    bundle reports two classes called NC, loses AD, and a binary view drops
+    the healthy controls while still claiming to compare NC against AD.
+    """
+
+    def _write_labels(self, tmp_path, labels, *, seed: int = 11) -> None:
+        rng = np.random.default_rng(seed)
+        n_samples = len(labels)
+        _write(
+            {
+                "train_set": rng.normal(0.5, 0.2, (n_samples, 6, 40, 3)),
+                "train_diagnose": np.asarray(labels, dtype=np.int64),
+                "train_population": np.stack(
+                    (np.zeros(n_samples), rng.normal(65, 6, n_samples)), axis=1
+                ),
+            },
+            tmp_path / "data.mat",
+        )
+
+    def test_canonical_three_class_file_keeps_names_aligned(self, tmp_path) -> None:
+        self._write_labels(tmp_path, [0, 1, 2] * 10)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.raw_label_map == {0: 0, 1: 1, 2: 2}
+        assert bundle.class_labels == {0: "NC", 1: "MCI", 2: "AD"}
+        assert bundle.label_map == {0: "NC", 1: "MCI", 2: "AD"}
+        assert bundle.class_names == ("NC", "MCI", "AD")
+
+    def test_canonical_three_class_binary_view_keeps_nc_and_ad(self, tmp_path) -> None:
+        self._write_labels(tmp_path, [0, 1, 2] * 10)
+        binary = load_ai4ad_mat(tmp_path / "data.mat").task_view("binary")
+        assert binary.n_samples == 20
+        assert int((binary.y == 1).sum()) == 10  # only the raw==2 subjects
+        assert binary.label_map == {0: "NC", 1: "AD"}
+
+    def test_canonical_nc_ad_file_is_a_binary_view(self, tmp_path) -> None:
+        self._write_labels(tmp_path, [0, 2] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.class_labels == {0: "NC", 1: "AD"}
+        binary = bundle.task_view("binary")
+        assert binary.n_samples == 30
+        assert binary.label_map == {0: "NC", 1: "AD"}
+
+    def test_canonical_file_without_ad_refuses_the_binary_view(self, tmp_path) -> None:
+        # 0/1/2 coding means 0=NC, 1=MCI, 2=AD, so a {0,1} file has no AD.
+        self._write_labels(tmp_path, [0, 1] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.class_labels == {0: "NC", 1: "MCI"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+    def test_official_mci_ad_file_refuses_the_binary_view(self, tmp_path) -> None:
+        # 1/2/3 coding means 2=MCI, 3=AD, so a {2,3} file has no NC. The old
+        # canonical fallback named label 0 "NC" and silently relabelled every
+        # MCI subject as a healthy control.
+        self._write_labels(tmp_path, [2, 3] * 15, seed=12)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.class_labels == {0: "MCI", 1: "AD"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+
 class TestSplitSelection:
     def test_auto_prefers_the_training_set(self, tmp_path) -> None:
         payload = _tensor_bundle(tmp_path)
@@ -412,3 +477,64 @@ class TestContractErrors:
         bundle = load_ai4ad_mat(tmp_path / "data.mat")
         assert not bundle.mask[0, 0, 0, 0]
         assert bundle.mask.sum() == bundle.X.size - 1
+
+
+class TestAmbiguousRawCoding:
+    """A canonical {1,2} file is indistinguishable from an official {1,2} file.
+
+    Official wins, matching the AI4AD convention; the docstring records the
+    ambiguity and the binary view refuses. This pins the current behaviour so
+    a future change to the tie-break is deliberate.
+    """
+
+    def _write_labels(self, tmp_path, labels, *, seed: int = 21) -> None:
+        rng = np.random.default_rng(seed)
+        n_samples = len(labels)
+        _write(
+            {
+                "train_set": rng.normal(0.5, 0.2, (n_samples, 6, 40, 3)),
+                "train_diagnose": np.asarray(labels, dtype=np.int64),
+                "train_population": np.stack(
+                    (np.zeros(n_samples), rng.normal(65, 6, n_samples)), axis=1
+                ),
+            },
+            tmp_path / "data.mat",
+        )
+
+    def test_canonical_mci_ad_file_is_named_by_the_official_table(self, tmp_path) -> None:
+        # canonical 1=MCI, 2=AD; the raw keys {1,2} read as official NC/MCI.
+        self._write_labels(tmp_path, [1, 2] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        assert bundle.class_labels == {0: "NC", 1: "MCI"}
+        with pytest.raises(ValueError, match="needs both an NC and an AD"):
+            bundle.task_view("binary")
+
+    def test_explicit_names_resolve_the_ambiguity(self, tmp_path) -> None:
+        # The caller declares canonical 0=NC, 1=AD; with names present the
+        # raw-key tie-break never runs, and the binary view keeps both classes.
+        self._write_labels(tmp_path, [1, 2] * 15)
+        bundle = load_ai4ad_mat(tmp_path / "data.mat")
+        named = replace(bundle, class_labels={0: "NC", 1: "AD"})
+        binary = named.task_view("binary")
+        assert binary.n_samples == 30
+        assert binary.label_map == {0: "NC", 1: "AD"}
+        assert binary.y.tolist() == [0, 1] * 15
+
+
+class TestAxisAmbiguity:
+    """A label length matching two axes is an ambiguous layout, not a guess."""
+
+    def test_multi_axis_match_is_refused(self, tmp_path) -> None:
+        # 12 subjects, but tract count is also 12: the subject axis cannot be
+        # located without guessing, and guessing once redefined the tensor.
+        rng = np.random.default_rng(3)
+        n = 12
+        _write(
+            {
+                "train_set": rng.normal(size=(n, n, 10, 2)),
+                "train_diagnose": np.tile([1, 2, 3], n // 3),
+            },
+            tmp_path / "data.mat",
+        )
+        with pytest.raises(ValueError, match="ambiguous"):
+            load_ai4ad_mat(tmp_path / "data.mat")

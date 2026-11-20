@@ -19,7 +19,12 @@ All three strategies are reported because their gap is a dataset result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation-only: the runtime import stays behind the torch gate in
+    # _load_deep_modules.
+    from dit.models.domain_train import DomainTrainConfig
 
 import numpy as np
 
@@ -27,9 +32,8 @@ from dit.data.covariates import (
     COVARIATE_STRATEGIES,
     Residualizer,
     covariate_matrix,
-    strip_covariate_columns,
 )
-from dit.data.schema import DatasetBundle
+from dit.data.schema import DatasetBundle, is_binary_task
 from dit.data.preprocessing import smooth_profiles
 from dit.data.selection import SparseBlockSelector
 from dit.data.splits import split_indices
@@ -134,12 +138,83 @@ class ExperimentConfig:
     control_view: str | None = None
 
     def __post_init__(self) -> None:
+        # Type guards before range comparisons: a YAML config can deliver a
+        # string where a number is expected, and ``0 < "0.05"`` raises
+        # TypeError, which the CLI's ValueError-only contract does not catch.
+        for name in (
+            "n_splits",
+            "inner_splits",
+            "smooth_window",
+            "seed",
+            "n_jobs",
+            "deep_epochs",
+            "deep_batch_size",
+            "deep_patience",
+            "deep_d_model",
+            "deep_layers",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise ValueError(
+                    f"{name} must be an integer, got {type(value).__name__}"
+                )
+        # The string fields are consumed with .lower()/.upper() downstream: a
+        # YAML number here would surface as a distant AttributeError instead
+        # of this config error.
+        for name in ("model", "task", "split_strategy", "feature_view", "device"):
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string, got {type(value).__name__}")
+        # Bool fields silently truthify a string ("no" would enable
+        # determinism / selection and the report would claim the opposite of
+        # the config).
+        for name in ("deep_deterministic", "include_missing_pattern", "enable_selection"):
+            value = getattr(self, name)
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean, got {type(value).__name__}")
+        for name in ("top_blocks", "max_features"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, np.integer))
+            ):
+                raise ValueError(
+                    f"{name} must be an integer or null, got {type(value).__name__}"
+                )
+            # Zero or negative would be silently clamped by the selector
+            # (max(1, ...) / the argmax fallback), contradicting the config.
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be >= 1, got {value}")
+        if isinstance(self.keep_fraction, bool) or not isinstance(
+            self.keep_fraction, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(
+                f"keep_fraction must be a number, got {type(self.keep_fraction).__name__}"
+            )
+        # A bare string is iterable, so the duplicate check below would report
+        # "must not repeat a model" for a plain scalar.
+        if isinstance(self.ensemble_models, str) or not isinstance(
+            self.ensemble_models, (tuple, list)
+        ):
+            raise ValueError(
+                "ensemble_models must be a sequence of model names, not "
+                f"{type(self.ensemble_models).__name__}"
+            )
+        for member in self.ensemble_models:
+            if not isinstance(member, str):
+                raise ValueError(
+                    f"ensemble_models entries must be strings, got {member!r}"
+                )
+        # Normalise to a tuple so a config that crossed JSON/YAML (list) still
+        # round-trips equal to the in-memory one.
+        object.__setattr__(self, "ensemble_models", tuple(self.ensemble_models))
         if self.covariate_strategy not in COVARIATE_STRATEGIES:
             raise ValueError(
                 f"unknown covariate_strategy {self.covariate_strategy!r}; "
                 f"use {COVARIATE_STRATEGIES}"
             )
-        if self.threshold_criterion not in {"f1", "balanced", "fixed"}:
+        # A tuple, not a set: a YAML list here would raise TypeError on the
+        # set's hash probe instead of this config error.
+        if self.threshold_criterion not in ("f1", "balanced", "fixed"):
             raise ValueError(f"unknown threshold_criterion {self.threshold_criterion!r}")
         if self.n_splits < 2:
             raise ValueError("n_splits must be >= 2")
@@ -173,11 +248,11 @@ class ExperimentConfig:
             )
 
     def describe(self) -> dict[str, object]:
-        return {
-            key: value
-            for key, value in sorted(self.__dict__.items())
-            if value is not None and value != () and value != [] and value != tuple()
-        }
+        # Every field, including explicit None: describe() feeds both the
+        # report's configuration section and the deployment artifact's config
+        # snapshot, and dropping None made a reloaded artifact restore
+        # dataclass defaults (an explicit max_features=None came back as 300).
+        return dict(sorted(self.__dict__.items()))
 
     @property
     def covariates_as_features(self) -> bool:
@@ -216,9 +291,6 @@ class ExperimentResult:
         # Appended only when set, so keys for ordinary runs stay identical to
         # earlier reports.
         return f"{base}|{cfg.control_view}" if cfg.control_view else base
-
-    def to_fold_dicts(self) -> tuple[dict[str, object], ...]:
-        return self.folds
 
     def as_evaluation_result(self):
         """Adapt to the shape :mod:`dit.evaluation.runner` expects."""
@@ -291,29 +363,11 @@ def prepare_matrix(
     return features, covariates, {
         "layout": layout,
         "model_layout": model_layout,
+        # Always present, None when there is no control view, so consumers
+        # can use one .get shape instead of two dict shapes.
+        "control_names": None,
         "n_core_columns": layout.n_feature_columns,
     }
-
-
-def _apply_residualizer(
-    train: np.ndarray,
-    test: np.ndarray,
-    train_cov: np.ndarray,
-    test_cov: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, Residualizer]:
-    """Standalone residualization kept for direct callers and tests.
-
-    The experiment path no longer uses it: residualization there lives inside
-    the sklearn pipeline (see :func:`make_search_estimator`), which is what
-    keeps the regression fold-local under nested search.
-    """
-
-    fitted = Residualizer().fit(train, train_cov)
-    return (
-        fitted.transform(train, train_cov),
-        fitted.transform(test, test_cov),
-        fitted,
-    )
 
 
 def _require_inner_class_support(cv: Any, y_train: np.ndarray, groups: np.ndarray | None) -> None:
@@ -516,7 +570,12 @@ def run_experiment(
             oof_pred[test_idx] = np.argmax(probabilities, axis=1)
             fold_reports.append(
                 {
-                    **classification_metrics(view.y[test_idx], oof_pred[test_idx], probabilities),
+                    **classification_metrics(
+                view.y[test_idx],
+                oof_pred[test_idx],
+                probabilities,
+                binary_view=is_binary_task(config.task),
+            ),
                     "fold": str(fold_id),
                     "n_train": int(train_idx.size),
                     "n_test": int(test_idx.size),
@@ -582,7 +641,9 @@ def run_experiment(
         if fitted_selector is not None:
             n_features_used = int(fitted_selector.n_selected)
 
-        report = classification_metrics(view.y[test_idx], predictions, probabilities)
+        report = classification_metrics(
+            view.y[test_idx], predictions, probabilities, binary_view=is_binary_task(config.task)
+        )
         report.update(
             {
                 "fold": str(fold_id),
@@ -623,7 +684,9 @@ def run_experiment(
 
     # The outer-fold argmax is the performance estimate: each row came from a
     # model that did not train on it, before any rule observed its label.
-    oof_argmax_metrics = classification_metrics(view.y, oof_pred, oof_prob)
+    oof_argmax_metrics = classification_metrics(
+        view.y, oof_pred, oof_prob, binary_view=is_binary_task(config.task)
+    )
     aggregate = dict(oof_argmax_metrics)
     aggregate["threshold_criterion"] = config.threshold_criterion
     aggregate["threshold_evaluation"] = "outer_oof_argmax"
@@ -652,7 +715,12 @@ def run_experiment(
         oof_prob,
         criterion=config.threshold_criterion,
     )
-    thresholded_selection_metrics = classification_metrics(view.y, policy.predict(oof_prob), oof_prob)
+    thresholded_selection_metrics = classification_metrics(
+        view.y,
+        policy.predict(oof_prob),
+        oof_prob,
+        binary_view=is_binary_task(config.task),
+    )
     thresholded_selection_metrics["scope"] = "all_outer_oof_used_for_threshold_fit"
     thresholded_selection_metrics["not_for_performance_comparison"] = True
 
@@ -671,21 +739,23 @@ def run_experiment(
     )
 
 
-def _fold_weights(scores: list[float], weighting: str) -> np.ndarray:
-    """Normalised per-fold weights for soft voting.
+def _fold_weights(scores: list[float], weighting: str) -> tuple[np.ndarray, bool]:
+    """Normalised per-fold weights for soft voting, plus a fallback flag.
 
     ``inner_score`` uses each base model's balanced accuracy from nested search
     within the same outer fold, avoiding leakage. Non-positive scores receive
-    zero weight; if all scores are unusable, weights fall back to equal.
+    zero weight; if all scores are unusable, weights fall back to equal --
+    the flag lets the fold report say so instead of publishing a
+    ``weights`` dict that silently contradicts the configured weighting.
     """
 
     if weighting == "equal":
-        return np.full(len(scores), 1.0 / len(scores))
+        return np.full(len(scores), 1.0 / len(scores)), False
     values = np.where(np.isfinite(scores) & (np.asarray(scores) > 0), scores, 0.0)
     total = values.sum()
     if total <= 0:
-        return np.full(len(scores), 1.0 / len(scores))
-    return values / total
+        return np.full(len(scores), 1.0 / len(scores)), True
+    return values / total, False
 
 
 def _base_config_for_ensemble(config: ExperimentConfig, model: str) -> ExperimentConfig:
@@ -756,7 +826,7 @@ def run_ensemble(
             indexed.append(match)
 
         scores = [_fold_tuning_score(match) for match in indexed]
-        weights = _fold_weights(scores, config.ensemble_weighting)
+        weights, weighting_fallback = _fold_weights(scores, config.ensemble_weighting)
         averaged = sum(
             weight * result.probabilities[test_idx]
             for weight, result in zip(weights, base_results)
@@ -764,7 +834,10 @@ def run_ensemble(
         oof_prob[test_idx] = averaged
 
         average_report = classification_metrics(
-            view.y[test_idx], np.argmax(averaged, axis=1), averaged
+            view.y[test_idx],
+            np.argmax(averaged, axis=1),
+            averaged,
+            binary_view=is_binary_task(config.task),
         )
         provenance = fold_provenance(
             test_idx,
@@ -786,6 +859,10 @@ def run_ensemble(
                     model: float(weight)
                     for model, weight in zip(config.ensemble_models, weights)
                 },
+                # Recorded when the configured weighting produced no usable
+                # score and the vote silently became equal-weight; without it
+                # the reader cannot tell inner_score from equal.
+                "weighting_fallback": weighting_fallback,
                 "base_models": [
                     {
                         "model": base_config.model,
@@ -808,7 +885,9 @@ def run_ensemble(
         raise RuntimeError(f"ensemble did not predict every subject: {missing[:10]}")
 
     oof_argmax = np.argmax(oof_prob, axis=1)
-    oof_argmax_metrics = classification_metrics(view.y, oof_argmax, oof_prob)
+    oof_argmax_metrics = classification_metrics(
+        view.y, oof_argmax, oof_prob, binary_view=is_binary_task(config.task)
+    )
     aggregate = dict(oof_argmax_metrics)
     aggregate["threshold_criterion"] = config.threshold_criterion
     aggregate["threshold_evaluation"] = "outer_oof_argmax"
@@ -829,7 +908,12 @@ def run_ensemble(
     # This policy is fit for future deployment only.  It is not used for the
     # outer-CV score because the full OOF labels selected it.
     policy = fit_threshold(view.y, oof_prob, criterion=config.threshold_criterion)
-    thresholded_selection_metrics = classification_metrics(view.y, policy.predict(oof_prob), oof_prob)
+    thresholded_selection_metrics = classification_metrics(
+        view.y,
+        policy.predict(oof_prob),
+        oof_prob,
+        binary_view=is_binary_task(config.task),
+    )
     thresholded_selection_metrics["scope"] = "all_outer_oof_used_for_threshold_fit"
     thresholded_selection_metrics["not_for_performance_comparison"] = True
 

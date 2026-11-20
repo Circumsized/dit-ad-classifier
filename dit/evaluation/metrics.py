@@ -22,6 +22,10 @@ def confusion_matrix(y_true, y_pred, labels=None) -> np.ndarray:
 def expected_calibration_error(y_true, probabilities, n_bins: int = 10) -> float:
     """Compute confidence-based expected calibration error."""
 
+    if isinstance(n_bins, bool) or not isinstance(n_bins, (int, np.integer)):
+        raise ValueError(f"n_bins must be an integer, got {type(n_bins).__name__}")
+    if n_bins < 1:
+        raise ValueError("n_bins must be >= 1")
     true = np.asarray(y_true, dtype=int).reshape(-1)
     prob = _as_probability_matrix(probabilities)
     if prob.shape[0] != true.shape[0]:
@@ -40,8 +44,17 @@ def expected_calibration_error(y_true, probabilities, n_bins: int = 10) -> float
     return float(ece)
 
 
-def classification_metrics(y_true, y_pred, probabilities=None) -> dict[str, object]:
-    """Return competition and reliability metrics in JSON-friendly form."""
+def classification_metrics(
+    y_true, y_pred, probabilities=None, *, binary_view: bool = False
+) -> dict[str, object]:
+    """Return competition and reliability metrics in JSON-friendly form.
+
+    ``binary_view`` declares that the task view renumbered NC/AD to 0/1
+    (:meth:`DatasetBundle.task_view`).  The sensitivity/specificity block is
+    emitted only then: a multiclass fold that happens to hold two classes
+    labels them by position, so class 1 there is MCI and "sensitivity" would
+    misname its recall.
+    """
 
     true = np.asarray(y_true, dtype=int).reshape(-1)
     pred = np.asarray(y_pred, dtype=int).reshape(-1)
@@ -81,7 +94,11 @@ def classification_metrics(y_true, y_pred, probabilities=None) -> dict[str, obje
         "class_f1": {str(label): float(value) for label, value in zip(classes, f1)},
         "confusion_matrix": matrix.tolist(),
     }
-    if len(classes) == 2:
+    # The disease convention needs two classes in y_true itself: a fold whose
+    # labels are single-class but whose predictions spill into a second class
+    # would otherwise publish NaN sensitivity/specificity (recalls[1] has no
+    # support), which only _json_safe rescues downstream.
+    if binary_view and len(np.unique(true)) == 2:
         # Binary convention: class 0 is the reference, class 1 the disease.
         result["specificity"] = float(recalls[0])
         result["sensitivity"] = float(recalls[1])
@@ -100,7 +117,7 @@ def classification_metrics(y_true, y_pred, probabilities=None) -> dict[str, obje
             if len(np.unique(target)) == 2:
                 aucs.append(_binary_auc(target, prob[:, int(label)]))
         result["roc_auc"] = float(np.mean(aucs)) if aucs else None
-        if len(classes) == 2:
+        if binary_view and len(np.unique(true)) == 2:
             result["auc_disease"] = _binary_auc((true == classes[1]).astype(int), prob[:, int(classes[1])])
         one_hot = np.eye(prob.shape[1], dtype=float)[true]
         result["brier_score"] = float(np.mean(np.sum((prob - one_hot) ** 2, axis=1)))

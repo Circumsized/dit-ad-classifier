@@ -315,6 +315,108 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="checksum mismatch"):
             load_deployment_artifact(artifact)
 
+    def test_load_refuses_an_artifact_without_a_config_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        payload = pickle_module.dumps({"artifact_version": ARTIFACT_VERSION})
+        target = tmp_path / "no_config.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        # A missing config section is a corrupt artifact, not a KeyError
+        # traceback: the CLI only catches ValueError.
+        with pytest.raises(ValueError, match="config"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_a_null_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # A null section is corruption with the key present: refuse at load
+        # with the artifact path instead of an AttributeError later.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": None,
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 1],
+            }
+        )
+        target = tmp_path / "null_section.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="null 'label_map' section"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_an_artifact_missing_a_required_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # A truncated artifact must surface as a ValueError for every section,
+        # not just config: the CLI only catches ValueError.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "config": {"model": "linear_svm"}}
+        )
+        target = tmp_path / "truncated.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        # The loader reports the first missing section it reaches (config
+        # builds first, then label_map), each named with the artifact path.
+        with pytest.raises(ValueError, match="'label_map' section"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_an_incompatible_config_section(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # An artifact whose config keys no longer line up (older/newer writer)
+        # must surface as a clean ValueError, not a TypeError traceback.
+        payload = pickle_module.dumps(
+            {"artifact_version": ARTIFACT_VERSION, "config": {"renamed_field": 1}}
+        )
+        target = tmp_path / "future.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="incompatible"):
+            load_deployment_artifact(target)
+
+    def test_artifact_config_roundtrip_keeps_explicit_none(self, tmp_path) -> None:
+        from dit.deployment import (
+            fit_deployment_model,
+            load_deployment_artifact,
+            save_deployment_artifact,
+        )
+
+        # describe() used to drop the explicit None, so the reloaded artifact
+        # came back with max_features=300 -- a config that no longer matched
+        # the run that produced it.
+        config = ExperimentConfig(
+            model="linear_svm", n_splits=2, inner_splits=2, seed=1, max_features=None
+        )
+        assert config.describe()["max_features"] is None
+        model = fit_deployment_model(_bundle(seed=41, n=80), config)
+        loaded = load_deployment_artifact(
+            save_deployment_artifact(model, tmp_path / "model.joblib")
+        )
+        assert loaded.config == config
+        assert loaded.config.max_features is None
+
     def test_load_refuses_a_missing_sidecar(self, tmp_path) -> None:
         from dit.deployment import load_deployment_artifact, save_deployment_artifact
 
@@ -451,3 +553,143 @@ class TestDeploymentClosure:
         lines = predictions_csv.read_text(encoding="utf-8").splitlines()
         assert lines[0].startswith("subject_id,predicted_label,predicted_class,p_")
         assert len(lines) == 81  # header + 80 subjects
+
+    def test_predict_maps_columns_through_the_fitted_classes(self, tmp_path) -> None:
+        # A multiclass fit whose rows miss the middle class has classes_=[0,2];
+        # argmax alone would report column 1 as label 1, a class no subject
+        # belongs to (silently mislabelled submission rows).
+        from dit.deployment import (
+            fit_deployment_model,
+            load_deployment_artifact,
+            predict_unlabeled,
+            save_deployment_artifact,
+        )
+        from dit.data.schema import DatasetBundle
+        from dit.data.synthetic import make_synthetic_bundle
+
+        bundle = make_synthetic_bundle(n_samples=60, n_sites=3, n_classes=3, seed=9)
+        view = bundle.task_view("multiclass")
+        keep = np.isin(view.y, [0, 2])
+        subset = DatasetBundle(
+            X=view.X[keep], y=view.y[keep], age=view.age[keep], sex=view.sex[keep],
+            site=view.site[keep], tract_names=view.tract_names,
+            metric_names=view.metric_names, raw_label_map=view.raw_label_map,
+            class_labels=view.class_labels,
+        )
+        config = ExperimentConfig(
+            model="linear_svm", task="multiclass", n_splits=2, inner_splits=2, seed=1
+        )
+        model = fit_deployment_model(subset, config)
+        assert model.classes_.tolist() == [0, 2]
+        outcome = predict_unlabeled(subset, model)
+        assert set(np.unique(outcome["predictions"]).tolist()) <= {0, 2}
+        assert all(name in {"NC", "AD"} for name in outcome["predicted_names"])
+
+    def test_load_refuses_float_coerced_classes(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # np.asarray(dtype=int) would silently truncate [1.9, 2.9] to [1, 2] --
+        # classes 1 and 2, a class no subject belongs to -- reviving the
+        # mislabelled-submission bug through the loading door.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC", 2: "AD"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [1.9, 2.9],
+            }
+        )
+        target = tmp_path / "float_classes.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="malformed 'classes'"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_empty_sections(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # An empty pair passes the set-equality check and used to defer an
+        # IndexError (outside the CLI's ValueError contract) to predict time.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [],
+            }
+        )
+        target = tmp_path / "empty.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="empty 'classes'"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_an_out_of_range_class(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # 2**70 passes the isinstance(int) check and used to escape as a bare
+        # OverflowError from the C-long conversion.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 2**70],
+            }
+        )
+        target = tmp_path / "huge.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="out-of-range 'classes'"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_disagreeing_classes_and_label_map(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # classes_ wider than label_map used to silently drop the extra
+        # probability column from the submission CSV (exit 0).
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC", 1: "MCI"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 1, 2],
+            }
+        )
+        target = tmp_path / "mismatched.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="disagree"):
+            load_deployment_artifact(target)

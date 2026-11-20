@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .schema import LABEL_NAMES, DatasetBundle, canonicalize_labels
+from .schema import DatasetBundle, canonicalize_labels, raw_label_names
 
 OFFICIAL_REPOSITORY = "https://github.com/YongLiuLab/AI4AD_AFQ"
 KNOWN_METRICS = ("FA", "MD", "RD", "AD", "CL", "CURVATURE", "TORSION", "VOLUME")
@@ -110,10 +110,11 @@ def load_ai4ad_mat(
     else:
         subject_id = np.arange(n_samples, dtype=np.int64)
 
-    class_labels: dict[int, str] = {}
-    for raw, canonical in raw_label_map.items():
-        if int(raw) in LABEL_NAMES:
-            class_labels[int(canonical)] = LABEL_NAMES[int(raw)]
+    # Name classes from the coding the file used: official 1/2/3 files map
+    # through LABEL_NAMES, already-canonical 0/1/2 files through
+    # CANONICAL_NAMES. The official table would shift a canonical file's
+    # classes by one and drop its AD class.
+    class_labels: dict[int, str] = raw_label_names(raw_label_map)
 
     return DatasetBundle(
         X=X,
@@ -314,7 +315,9 @@ def _parse_numeric_tensor(
     )
     arr = np.moveaxis(arr, sample_axis, 0)
     remaining = arr.shape[1:]
-    point_axis_local = 1 + _choose_axis(remaining, 100, prefer=int(np.argmax(remaining)))
+    point_axis_local = 1 + _choose_axis(
+        remaining, 100, prefer=int(np.argmax(remaining)), noun="points"
+    )
     arr = np.moveaxis(arr, point_axis_local, 2)
 
     if arr.ndim == 3:
@@ -355,15 +358,21 @@ def _choose_axis(
     *,
     exclude: frozenset[int] = frozenset(),
     require_hint: bool = False,
+    noun: str = "subjects",
 ) -> int:
-    """Locate one axis by size, refusing to guess.
+    """Locate one axis by size, refusing to guess when the answer is ambiguous.
 
     ``target`` is normally the expected subject count taken from the label
     vector.  A match is only trusted when it is the sole match outside
     ``exclude``; when ``require_hint`` is set and nothing matches, the loader
-    raises instead of picking an axis.  Without that guard a mis-sized label
-    vector whose length happened to equal the metric count silently redefined
-    which axis held subjects, and the downstream row-count check passed on the
+    raises instead of picking an axis, and two matches are refused as
+    ambiguous.  A *sole* match is still trusted -- there is no second source
+    of truth to cross-check it against -- so a label vector whose length
+    happens to equal the tract or point count is misattributed rather than
+    caught; only the metric axis is excluded up front, because its size is
+    the smallest one.  Without these guards a mis-sized label vector whose
+    length happened to equal the metric count silently redefined which axis
+    held subjects, and the downstream row-count check passed on the
     reinterpretation instead of failing.
     """
 
@@ -374,10 +383,14 @@ def _choose_axis(
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            return matches[0]
+            raise ValueError(
+                f"expected {target} {noun} but {len(matches)} axes of the "
+                f"tensor {shape} match ({matches}); the layout is ambiguous -- "
+                "rename the offending axis or pass an explicit metrics subset"
+            )
         if require_hint:
             raise ValueError(
-                f"expected {target} subjects but no axis of the tensor {shape} "
+                f"expected {target} {noun} but no axis of the tensor {shape} "
                 "matches once the metric axis is excluded; the label vector "
                 "probably has the wrong row count"
             )

@@ -190,6 +190,28 @@ def _digest_path(path: Path) -> Path:
     return path.with_name(path.name + ".sha256")
 
 
+def _section(payload_dict: dict, key: str, source: Path):
+    """Fetch one required artifact section as a ValueError, never a KeyError."""
+
+    try:
+        value = payload_dict[key]
+    except KeyError as exc:
+        raise ValueError(
+            f"{source} has no {key!r} section; it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        ) from exc
+    if value is None:
+        # A null section is the same corruption with the key present: refuse
+        # at load (with the artifact path) instead of deferring an
+        # AttributeError/TypeError to predict time -- or worse, silently
+        # accepting it.
+        raise ValueError(
+            f"{source} has a null {key!r} section; it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    return value
+
+
 def save_deployment_artifact(model: DeploymentModel, path: str | Path) -> Path:
     """Pickle the deployment bundle to ``path`` (parent directories created).
 
@@ -252,16 +274,106 @@ def load_deployment_artifact(path: str | Path) -> DeploymentModel:
     payload_dict = _ArtifactUnpickler(io.BytesIO(payload)).load()
     if not isinstance(payload_dict, dict) or payload_dict.get("artifact_version") != ARTIFACT_VERSION:
         raise ValueError(f"{source} is not a version-{ARTIFACT_VERSION} deployment artifact")
-    config_values = dict(payload_dict["config"])
-    config = ExperimentConfig(**config_values)
+    # Every required section surfaces as a ValueError, because the CLI
+    # contract (cli/main.py) only catches ValueError: a truncated or
+    # foreign artifact must print one actionable line, not a KeyError
+    # traceback.
+    config_values = _section(payload_dict, "config", source)
+    try:
+        config = ExperimentConfig(**dict(config_values))
+    except (TypeError, ValueError) as exc:
+        # dict() on a non-mapping raises ValueError with a bare dict-builder
+        # message; ExperimentConfig raises ValueError for a bad value and
+        # TypeError for an unknown key. All three get the artifact path.
+        raise ValueError(
+            f"{source} has a malformed or incompatible 'config' section: {exc}"
+        ) from exc
+    if not isinstance(config_values, dict):
+        raise ValueError(
+            f"{source} has a malformed 'config' section; it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    raw_label_map = _section(payload_dict, "label_map", source)
+    # to_dict() stringifies the keys for JSON friendliness, so a legitimate
+    # artifact carries digit strings; int() below accepts both. What must be
+    # refused is anything int() cannot read (None keys would escape as a bare
+    # TypeError) and booleans (True would read as class 1).
+    def _is_label_key(key: object) -> bool:
+        if isinstance(key, bool):
+            return False
+        if isinstance(key, int):
+            return True
+        if isinstance(key, str) and key.strip().lstrip("-").isdigit():
+            return True
+        return False
+
+    if not isinstance(raw_label_map, dict) or any(
+        not _is_label_key(key) for key in raw_label_map
+    ):
+        raise ValueError(
+            f"{source} has a malformed 'label_map' section; its keys must be "
+            f"integers (or digit strings), and it is not a complete "
+            f"version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    raw_classes = _section(payload_dict, "classes", source)
+    if not isinstance(raw_classes, (list, tuple)) or any(
+        isinstance(value, bool) or not isinstance(value, int) for value in raw_classes
+    ):
+        # np.asarray(dtype=int) would silently truncate floats ("[1.9, 2.9]"
+        # became classes [1, 2], a class no subject belongs to) or merge a
+        # string's digits; classes are the probability column order, so the
+        # section must be a plain list of integers.
+        raise ValueError(
+            f"{source} has a malformed 'classes' section; it must be a list of "
+            f"integers, got {type(raw_classes).__name__}"
+        )
+    if not raw_classes or not raw_label_map:
+        # An empty classes/label_map pair passes the set-equality check and
+        # used to defer an IndexError to predict time, outside the CLI's
+        # ValueError contract.
+        raise ValueError(
+            f"{source} has an empty 'classes' or 'label_map' section; it is not "
+            f"a complete version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    try:
+        classes_ = np.asarray(raw_classes, dtype=int)
+    except OverflowError as exc:
+        # A 2**70 label passes the isinstance(int) check and would otherwise
+        # escape as a bare OverflowError outside the CLI contract.
+        raise ValueError(f"{source} has an out-of-range 'classes' entry: {exc}") from exc
+    if set(classes_.tolist()) != set(int(key) for key in raw_label_map):
+        raise ValueError(
+            f"{source}: classes {sorted(classes_.tolist())} and label_map keys "
+            f"{sorted(int(key) for key in raw_label_map)} disagree; the artifact "
+            "is inconsistent and must be re-fitted"
+        )
+    if len({int(key) for key in raw_label_map}) != len(raw_label_map):
+        # Digit-string keys ("1" and "01") are both accepted for round-trip
+        # compatibility, but two spellings of one class would silently merge.
+        raise ValueError(
+            f"{source}: label_map keys collapse onto duplicate classes after "
+            "normalisation; the artifact is inconsistent and must be re-fitted"
+        )
+    raw_feature_names = _section(payload_dict, "feature_names", source)
+    if not isinstance(raw_feature_names, (list, tuple)):
+        raise ValueError(
+            f"{source} has a malformed 'feature_names' section; it is not a "
+            f"complete version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    raw_best_params = _section(payload_dict, "best_params", source)
+    if not isinstance(raw_best_params, dict):
+        raise ValueError(
+            f"{source} has a malformed 'best_params' section; it is not a "
+            f"complete version-{ARTIFACT_VERSION} deployment artifact"
+        )
     return DeploymentModel(
-        pipeline=payload_dict["pipeline"],
+        pipeline=_section(payload_dict, "pipeline", source),
         config=config,
-        label_map={int(key): str(value) for key, value in payload_dict["label_map"].items()},
-        feature_names=tuple(payload_dict["feature_names"]),
-        data_digest=str(payload_dict["data_digest"]),
-        best_params=dict(payload_dict["best_params"]),
-        classes_=np.asarray(payload_dict["classes"], dtype=int),
+        label_map={int(key): str(value) for key, value in raw_label_map.items()},
+        feature_names=tuple(raw_feature_names),
+        data_digest=str(_section(payload_dict, "data_digest", source)),
+        best_params=dict(raw_best_params),
+        classes_=classes_,
     )
 
 
@@ -301,8 +413,15 @@ def predict_unlabeled(
             "deployment model produced rows whose probabilities do not sum to 1 "
             f"(min {float(totals.min()):.6f}, max {float(totals.max()):.6f})"
         )
-    predictions = np.argmax(probabilities, axis=1)
-    named = [model.label_map.get(int(label), str(int(label))) for label in predictions]
+    # predict_proba columns follow the fitted classes_, which is not
+    # necessarily 0..n-1: a multiclass fit whose training rows miss the middle
+    # class has classes_=[0, 2], and argmax alone would report column 1 as
+    # label 1 -- a class no subject belongs to.
+    predictions = np.asarray(model.classes_, dtype=int)[np.argmax(probabilities, axis=1)]
+    # load_deployment_artifact guarantees every class has a label_map entry,
+    # so index instead of .get: a fallback would smuggle an unlabelled class
+    # into the submission file as a bare number.
+    named = [model.label_map[int(label)] for label in predictions]
     return {
         "probabilities": probabilities,
         "predictions": predictions,

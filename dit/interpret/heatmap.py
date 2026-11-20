@@ -11,6 +11,7 @@ or at something else.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,42 @@ LITERATURE_REGIONS: tuple[tuple[str, int, int], ...] = (
     ("cc", 1, 10),
 )
 
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Windows rejects these as bare filenames regardless of extension.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _safe_filename_component(name: str) -> str:
+    """Reduce an arbitrary label to a single safe path component.
+
+    Whitelisting beats blacklisting: separators, colons, leading dots and
+    ``..`` all disappear, and stripping ``._`` afterwards removes hidden-file
+    and parent-directory spellings.  An all-metacharacter name falls back to
+    a stable placeholder rather than an empty stem.
+
+    The cleaned stem is a filename, not an identifier: it may differ from the
+    metric name (leading ``_`` stripped, non-ASCII replaced), so the only
+    human-readable mapping back is the figure title, which keeps the
+    original name.
+    """
+
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("_", str(name)).strip("._")
+    # Windows rejects path components over 255 characters and a .mat field
+    # name is arbitrary, so cap the stem; render_metric_panel's collision
+    # loop keeps truncated names unique.
+    cleaned = cleaned[:100].rstrip(".")
+    # The only call site prefixes "importance_", so a device name can never
+    # become the file's basename today; the guard keeps the helper safe if
+    # it is ever reused without that prefix.
+    if cleaned.upper() in _WINDOWS_DEVICE_NAMES:
+        cleaned += "_dev"
+    return cleaned or "metric"
+
 
 def node_matrix(
     importance_rows: list[dict[str, object]],
@@ -41,9 +78,12 @@ def node_matrix(
     """Reshape per-node importance into a [tracts, nodes] matrix.
 
     Rows and columns keep ``layout`` order so a figure can be compared
-    tract-by-tract against the anatomical listing.  Metrics not requested are
-    averaged out, which is appropriate when the ranking model was fit on all of
-    them; pass ``metric_index`` to show one diffusion metric alone.
+    tract-by-tract against the anatomical listing.  Rows from other metrics
+    are dropped, not averaged: only ``metric_index`` — or, for a
+    single-metric ``metric`` layout, the layout's own metric — is placed on
+    the node axis, so a multi-metric ranking needs one call (or
+    :func:`render_metric_panel`) per metric.  On a multi-metric layout with
+    ``metric_index=None`` nothing is placed and the matrix stays zero.
     """
 
     if layout.kind == "summary":
@@ -107,7 +147,20 @@ def render_node_heatmap(
     if out_path is not None:
         target = Path(out_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(target, dpi=150)
+        try:
+            figure.savefig(target, dpi=150)
+        except OSError as exc:
+            # A failed savefig leaves a truncated file behind: delete it and
+            # report with the path, instead of a bare traceback plus garbage
+            # on disk (a too-long path or a full disk both land here).  The
+            # cleanup itself can fail on Windows (viewer holds the file
+            # open); losing the cleanup error matters less than losing the
+            # write error, so it is swallowed deliberately.
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ValueError(f"could not write heatmap {target}: {exc}") from exc
     if show:
         plt.show()
     plt.close(figure)
@@ -120,11 +173,20 @@ def render_metric_panel(
     *,
     out_dir: str | Path,
     title_prefix: str = "AI4AD feature importance",
-) -> list[Path]:
-    """Render one heatmap per diffusion metric present in the ranking."""
+) -> list[tuple[int, Path]]:
+    """Render one heatmap per diffusion metric present in the ranking.
 
-    targets: list[Path] = []
+    Returns ``(metric index, path)`` pairs: the sanitised filename no longer
+    identifies the metric, so callers need the pairing to report it.
+    """
+
+    # (metric index, path) pairs: the cleaned filename no longer identifies
+    # the metric, so the caller needs the pairing to report it.
+    targets: list[tuple[int, Path]] = []
     seen: set[int] = set()
+    # Case-folded: NTFS is case-insensitive, so "FA" and "fa" would silently
+    # overwrite each other's file even though the names differ.
+    used_names: set[str] = set()
     for row in importance_rows:
         metric = int(row["metric_index"])
         if metric in seen or metric >= layout.n_metrics:
@@ -134,14 +196,28 @@ def render_metric_panel(
         if not np.any(matrix):
             continue
         title = f"{title_prefix} - {layout.metric_names[metric]}"
+        # Metric names are .mat struct field names, i.e. arbitrary strings:
+        # they reach the filesystem here, so reduce each to one safe
+        # component before it becomes part of a path.  Cleaning can map two
+        # different names onto one stem ("_A" and "A"), and a disambiguated
+        # stem can collide with a third name's natural stem ("A" vs "A_2"),
+        # so keep extending until the name is unused rather than assuming one
+        # suffix is enough.
+        base = _safe_filename_component(layout.metric_names[metric])
+        name = base
+        attempt = 1
+        while name.casefold() in used_names:
+            name = f"{base}_{metric}" if attempt == 1 else f"{base}_{metric}_{attempt}"
+            attempt += 1
+        used_names.add(name.casefold())
         target = render_node_heatmap(
             matrix,
             layout.tract_names,
             title=title,
-            out_path=Path(out_dir) / f"importance_{layout.metric_names[metric]}.png",
+            out_path=Path(out_dir) / f"importance_{name}.png",
         )
         if target is not None:
-            targets.append(target)
+            targets.append((metric, target))
     return targets
 
 

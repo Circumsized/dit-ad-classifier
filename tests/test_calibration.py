@@ -82,7 +82,12 @@ def test_platt_scalars_shrink_the_calibration_error() -> None:
 
     scalars = fit_platt_scalars(inflated, labels)
     corrected = apply_platt_scalars(inflated, scalars)
-    assert expected_calibration_error(labels, corrected) < expected_calibration_error(labels, inflated)
+    raw_error = expected_calibration_error(labels, probabilities)
+    assert expected_calibration_error(labels, corrected) < expected_calibration_error(
+        labels, inflated
+    )
+    # And the corrected probabilities are no worse than never inflating at all.
+    assert expected_calibration_error(labels, corrected) <= raw_error * 1.05
 
 
 def test_platt_output_is_a_valid_distribution() -> None:

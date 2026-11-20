@@ -313,7 +313,7 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 |   python -m dit.cli predict --mat test.mat --artifact artifacts/model.joblib --out pred.csv|
 |          │                                                                                  |
 |          ├── 1. 签名核验: 计算工件实时 SHA-256 并与 .sha256 侧车完全匹配                    |
-|          ├── 2. 受限反序列化: RestrictedUnpickler 拦截非白名单命名空间                      |
+|          ├── 2. 受限反序列化: _ArtifactUnpickler 拦截非白名单命名空间                      |
 |          ├── 3. 特征矩阵重建: 依据工件固化的 FeatureLayout 解构盲测数据                     |
 |          ├── 4. 列契约校验: 特征列数必须严格等于 layout.total_features                      |
 |          └── 5. 导出结构化结果: 包含受试者 ID、预测编码、类名及后验概率矩阵                 |
@@ -322,7 +322,7 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 
 ### 6.1 反序列化安全白名单机制
 
-为了防范恶意反序列化代码执行风险，`dit.deployment.RestrictedUnpickler` 将类加载空间严格限制于以下基础根命名空间：
+为了防范恶意反序列化代码执行风险，`dit.deployment._ArtifactUnpickler` 将类加载空间严格限制于以下基础根命名空间：
 - `numpy`
 - `scipy`
 - `sklearn`
@@ -348,14 +348,20 @@ $$w_m = \frac{\text{BA}_{\text{inner}, m}}{\sum_{j=1}^M \text{BA}_{\text{inner},
 python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out reports/interp
 ```
 
-系统在全量有标签数据上拟合线性判别模型，提取各节点权重绝对值并生成 $18 \times 100$ 维度的热力图矩阵。系统自动检验并对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
+系统在全量有标签数据上拟合线性判别模型，提取各节点权重绝对值并生成 $18 \times 100$ 维度的热力图矩阵。该命令在全量数据上单模型拟合，因此**不支持** `--select`、`--covariate residualize`、`--control-view` 与 `--alignment`（前两者为折内评估步骤，`--alignment` 是 Transformer 的训练期损失项，经典模型无对应物）：传入会以 `error:` 退出而非静默忽略。系统自动检验并对齐以下公开文献报道的 AD 白质退化关键解剖区间（`literature_hits`）：
 
 | 结构代号 | 白质纤维束解剖全称 | 文献标记敏感节点区间 | 神经病理学相关性 |
 |---|---|---|---|
 | `UF_L` | 左侧钩束 (Uncinate Fasciculus) | 节点 75 至 100 (额叶端连接区) | 早期边缘系统与额叶解剖断连 |
 | `ATR_L` | 左侧丘脑前辐射 (Anterior Thalamic Radiation)| 节点 1 至 13 (丘脑前核投射区) | 胆碱能投射纤维受损 |
 | `CC_ForcepsMajor` | 胼胝体压部 (Splenium / Forceps Major) | 节点 1 至 10 (枕叶与后顶叶交汇区) | 半球间顶下皮质后部通讯退化 |
-| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) | 默认网络（DMN）核心中继节点 |
+| `CGC_L` | 扣带回扣带部 (Cingulum Cingulate) | 节点 40 至 60 (扣带回中段后部) ⚠️ 区间待证 | 默认网络（DMN）核心中继节点 |
+
+> **区间争议（待证）**：`CGC_L` 一行与代码实现不一致——`dit/interpret/heatmap.py` 的
+> `LITERATURE_REGIONS` 中 `cingulum` 为节点 1–10，本表为 40–60。2026-11-19 的外部
+> 文献检索未找到可核验来源支持任一区间（本表自身亦不带引用），因此**代码保持现状
+> （1–10）未改**，仅在此记录争议。在取得可引用来源前，涉及扣带回的 `literature_hits`
+> 命中结论不应单独作为证据引用。其余区段两侧一致。
 
 ---
 
@@ -375,7 +381,7 @@ python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out 
 | | `--out` | 目录路径 | `reports` | 报告输出目录，生成 `evaluation.json` 与 `evaluation.md`。 |
 | `fit` | `--artifact` | 文件路径 | 必须指定 | 模型序列化导出路径。自动生成同名 `.sha256` 侧车哈希文件。 |
 | `predict` | `--artifact` | 文件路径 | 必须指定 | 模型输入路径。前置校验 SHA-256 签名，未通过则直接拒绝执行。 |
-| | `--out` | 文件路径 | 必须指定 | 结构化预测结果 CSV 导出路径。 |
+| | `--out` | 文件路径 | 必须指定 | 结构化预测结果 CSV 导出路径。（`rad_scores.csv` 与预测 CSV 的文本单元格会中和电子表格公式注入：以 `=`/`+`/`-`/`@`/制表符/换行开头的值会加前导撇号 `'`，属有损转换，下游 join 前需去除。） |
 | `ablation` | `--model` | 字符串 | `linear_svm` | 执行协变量策略（none/feature/residualize）扫描，导出配对消融表。 |
 | `matrix` | `--model` | 字符串 | `linear_svm` | 批处理执行 2 任务 × 2 策略全景矩阵扫描，导出 `matrix_summary.json`。 |
 | `interpret` | `--view` | 字符串 | `profile` | 全量拟合模型，导出 $18 \times 100$ 解剖节点贡献热力图及文献对齐报告。 |

@@ -30,3 +30,7 @@ dist/
 *.ckpt
 # --- deployment artifacts and their checksum sidecars ---
 artifacts/
+
+# --- interpret heatmap probe outputs (filename sanitiser development) ---
+**/importance_*.png
+/panel_*/

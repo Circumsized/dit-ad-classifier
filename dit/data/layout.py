@@ -13,9 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-VALID_VIEWS = ("profile", "summary")
-
-
 @dataclass(frozen=True)
 class Block:
     """A group of columns that belong to one anatomical unit."""
@@ -213,6 +210,8 @@ class FeatureLayout:
     def describe(self) -> dict[str, object]:
         return {
             "kind": self.kind,
+            "tract_names": list(self.tract_names),
+            "metric_names": list(self.metric_names),
             "n_tracts": self.n_tracts,
             "n_metrics": self.n_metrics,
             "n_points": self.n_points,
@@ -277,23 +276,3 @@ def view_for_layout(
     raise ValueError(f"unknown feature view {view!r}")
 
 
-def expected_feature_count(
-    view: str,
-    metric_names: Iterable[str],
-    tract_names: Iterable[str],
-    n_points: int,
-    *,
-    include_covariates: bool,
-    include_missing_pattern: bool = False,
-) -> int:
-    """Column count a builder is expected to produce for a given view."""
-
-    layout = view_for_layout(
-        view,
-        metric_names,
-        tract_names,
-        n_points,
-        has_covariates=include_covariates,
-        has_missing_pattern=include_missing_pattern,
-    )
-    return layout.total_features

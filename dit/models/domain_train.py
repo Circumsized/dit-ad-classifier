@@ -8,7 +8,7 @@ decision is made on outer-fold training rows only.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -765,7 +765,7 @@ def search_domain_classifier(
     ``best_params`` field of the sklearn path.  The report's ``inner_cv`` field
     records how candidates were scored: ``"site_grouped"`` when the outer run
     is a domain-generalisation split (LOSO-like strategy, mirroring the
-    classical path's ``_inner_cv`` rule) and a whole site could be held out,
+    classical path's ``_inner_cv_for`` rule) and a whole site could be held out,
     ``"class_stratified"`` otherwise.
     """
 
@@ -777,7 +777,7 @@ def search_domain_classifier(
     if base.calibration != "none":
         DomainAlignedClassifier(base, device=device)._split_indices(labels)
 
-    # Same gating rule as the classical path's _inner_cv: site-grouped inner
+    # Same gating rule as the classical path's _inner_cv_for: site-grouped inner
     # selection is a Track-B (LOSO) protocol, so a stratified outer fold keeps
     # the class-stratified hold-out even when site labels exist.  Mixing the
     # two would give the deep path a stricter inner criterion than the

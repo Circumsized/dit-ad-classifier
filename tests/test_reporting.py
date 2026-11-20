@@ -28,7 +28,13 @@ from dit.evaluation.reporting import (
 
 
 class TestFoldTable:
-    def test_provenance_keys_are_kept(self) -> None:
+    def test_every_recorded_fold_key_reaches_the_report(self) -> None:
+        # Contract reversal (2026-11-20): the table used to filter fold keys
+        # through an explicit allowlist, which silently dropped real
+        # diagnostics whenever a runner gained a key (inner_best_score,
+        # inner_budget, residualizer, epochs_requested, weighting_fallback
+        # all vanished).  The project rule is that provenance is never
+        # silently dropped, so unknown keys now pass through.
         class FakeResult:
             folds = [
                 {
@@ -58,7 +64,7 @@ class TestFoldTable:
                     "test_class_counts": {"0": 8, "1": 7},
                     "held_out_site": "site-0",
                     "inner_cv": "site_grouped",
-                    "a_dropped_key": "should not appear",
+                    "a_new_diagnostic": "now appears",
                 }
             ]
 
@@ -80,9 +86,9 @@ class TestFoldTable:
             "data_digest",
             "test_class_counts",
             "held_out_site",
+            "a_new_diagnostic",
         ):
             assert key in row, key
-        assert "a_dropped_key" not in row
         # The payload must round-trip, or the report is not a report.
         assert json.loads(json.dumps(row))["base_models"][0]["model"] == "logistic"
 
@@ -275,6 +281,207 @@ def test_paired_comparison_section_renders_and_serializes_strictly(tmp_path) -> 
     assert json.loads(output.read_text(encoding="utf-8"))["paired_comparisons"]
 
 
-def test_write_json_refuses_nonstandard_nan(tmp_path) -> None:
-    with pytest.raises(ValueError, match="Out of range"):
-        write_json(tmp_path / "bad.json", {"value": float("nan")})
+def test_write_json_maps_non_finite_to_null(tmp_path) -> None:
+    # write_json runs _json_safe before the strict dump, so a non-finite
+    # float lands as null instead of either a bare NaN token or a crash --
+    # the same contract assemble_report has always had at its boundary.
+    write_json(tmp_path / "bad.json", {"value": float("nan")})
+    restored = json.loads((tmp_path / "bad.json").read_text(encoding="utf-8"))
+    assert restored["value"] is None
+
+
+def test_markdown_tables_escape_data_controlled_cells() -> None:
+    """A hostile feature view or model name must not break the table row.
+
+    ``feature_view`` can be a .mat metric name and result keys embed model
+    names, so pipe/backtick/bracket metacharacters must be neutralised.
+    """
+    hostile = SimpleNamespace(
+        model="lin|ear`<b>[x](y)",
+        task="bin|ary",
+        split_strategy="stratif|ied",
+        feature_view="MD`</td>`",
+        aggregate={"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5, "roc_auc": None},
+        folds=(),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    row = next(line for line in render_markdown(payload).splitlines() if line.startswith("| lin"))
+    # 11 columns -> exactly 12 structural pipes (escaped \| do not split).
+    assert row.replace("\|", "").count("|") == 12
+    assert r"lin\|ear" in row
+    assert "&lt;b&gt;" in row
+    assert r"\[x\]" in row
+
+
+def test_paired_comparison_table_escapes_reference_and_candidate() -> None:
+    comparison = {
+        "reference": "mod|el`x`",
+        "candidate": "cand<y>",
+        "metric": "balanced_accuracy",
+        "n_pairs": 5,
+        "mean_delta": 0.01,
+        "p_value": 0.5,
+        "p_value_holm": 0.5,
+        "status": "comparable",
+    }
+    payload = assemble_report(
+        [], dataset_summary={}, configuration={}, paired_comparisons=[comparison]
+    )
+    row = next(
+        line
+        for line in render_markdown(payload).splitlines()
+        if line.startswith("| mod")
+    )
+    # 8 columns -> exactly 9 structural pipes (escaped \| do not split).
+    assert row.replace("\|", "").count("|") == 9
+    assert r"mod\|el" in row and "cand&lt;y&gt;" in row
+
+
+def test_evaluation_result_to_dict_round_trips_without_torch() -> None:
+    # to_dict had its only coverage inside a torch-gated test; the core CI
+    # job never exercised it.
+    from dit.evaluation.runner import EvaluationResult
+    from dit.evaluation.threshold import ThresholdPolicy
+
+    result = EvaluationResult(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={"accuracy": 0.5},
+        folds=({"fold": "0", "accuracy": 0.5},),
+        predictions=np.asarray([0, 1]),
+        probabilities=np.asarray([[0.6, 0.4], [0.3, 0.7]]),
+        threshold=ThresholdPolicy((0.5, 0.5), (0, 1), "f1", 0.5),
+        thresholded_selection_metrics={"scope": "x"},
+    )
+    payload = result.to_dict()
+    assert payload["model"] == "linear_svm"
+    assert payload["predictions"] == [0, 1]
+    assert payload["threshold"]["criterion"] == "f1"
+    assert payload["thresholded_selection_metrics"] == {"scope": "x"}
+    json.dumps(payload, allow_nan=False)
+
+
+def test_paired_comparison_caveats_cannot_forge_markdown_structure() -> None:
+    # Caveats and reasons reach the report through this public API; an
+    # unescaped newline would forge headings and tables in the Markdown.
+    comparison = {
+        "reference": "a",
+        "candidate": "b",
+        "metric": "balanced_accuracy",
+        "n_pairs": 5,
+        "mean_delta": 0.01,
+        "p_value": 0.5,
+        "p_value_holm": 0.5,
+        "status": "tested",
+        "caveats": ["ok\r\n\r\n# Injected heading\n\n| fake | table |\n|---|---|\n| a | b |"],
+    }
+    payload = assemble_report(
+        [], dataset_summary={}, configuration={}, paired_comparisons=[comparison]
+    )
+    lines = render_markdown(payload).splitlines()
+    # The caveat stays inside its blockquote line; no forged heading or table
+    # row starts a new structural line.
+    assert not any(line.startswith("# Injected") for line in lines)
+    assert not any(line.startswith("| fake") for line in lines)
+    caveat_line = next(line for line in lines if line.startswith("> ") and "Injected" in line)
+    assert "\n" not in caveat_line
+
+
+def test_fold_table_passes_through_every_recorded_diagnostic() -> None:
+    # The old explicit allowlist silently dropped real fold diagnostics
+    # (inner_best_score, inner_budget, residualizer, epochs_requested,
+    # weighting_fallback); the table now passes unknown keys through.
+    from dit.evaluation.runner import EvaluationResult
+
+    fold = {
+        "fold": "0",
+        "n_train": 10,
+        "n_test": 5,
+        "accuracy": 0.8,
+        "balanced_accuracy": 0.8,
+        "macro_f1": 0.8,
+        "sensitivity": 0.9,
+        "specificity": 0.7,
+        "inner_best_score": 0.77,
+        "inner_budget": {"n_candidates": 9, "n_fits": 19},
+        "weighting_fallback": True,
+        "residualizer": {"include_intercept": True},
+        "test_index_digest": "d" * 64,
+        "task": "binary",
+        "split_strategy": "stratified",
+        "test_class_counts": {"0": 3, "1": 2},
+        "fold_comparable": True,
+    }
+    result = EvaluationResult(
+        model="ensemble",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={},
+        folds=(fold,),
+        predictions=np.zeros(2, dtype=int),
+        probabilities=np.full((2, 2), 0.5),
+    )
+    row = _fold_table(result)[0]
+    for key in (
+        "inner_best_score",
+        "inner_budget",
+        "weighting_fallback",
+        "residualizer",
+        "test_index_digest",
+    ):
+        assert key in row, key
+    json.dumps(row, allow_nan=False)
+
+
+def test_markdown_results_table_renders_null_aggregates_as_dash() -> None:
+    # A non-finite aggregate metric becomes null in JSON; the Markdown table
+    # must render "-" instead of crashing on float(None) after the JSON was
+    # already written.
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={
+            "accuracy": None,
+            "balanced_accuracy": None,
+            "macro_f1": None,
+            "roc_auc": None,
+            "sensitivity": None,
+            "specificity": None,
+        },
+        folds=(),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    rendered = render_markdown(payload)
+    row = next(line for line in rendered.splitlines() if line.startswith("| linear_svm"))
+    assert row.count("|") == 12
+    assert "-" in row
+
+
+def test_fold_spread_treats_explicit_none_as_unrecorded() -> None:
+    # float(None) used to crash the report assembly when a fold recorded an
+    # explicit null metric.
+    fold = {
+        "fold": "0",
+        "n_train": 10,
+        "n_test": 5,
+        "accuracy": None,
+        "balanced_accuracy": 0.8,
+        "macro_f1": 0.7,
+    }
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5, "roc_auc": None},
+        folds=(fold,),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    spread = payload["results"][0]["fold_metric_spread"]
+    assert spread["accuracy"]["n_folds"] == 0  # None filtered as non-finite
+    json.dumps(payload, allow_nan=False)

@@ -177,7 +177,7 @@ $$Z = [\mathbf{1}, \text{age}, \text{sex}] \in \mathbb{R}^{N \times 3}$$
 | 计算训练集统计量:                       |        | 状态: 完全冻结锁定             |
 |  - 中位数向量: med(X_train)             |        |                                |
 |  - 均值与方差: μ_train, σ_train         |        | 待命等待前向推理               |
-|  - ANOVA F 检验选择 Top-K 特征          |        |                                |
+|  - L1 弹性网系数幅值选择 Top-K 特征      |        |                                |
 |  - 求解 OLS 残差化系数 W                |        |                                |
 +--------------------+--------------------+        +----------------+---------------+
                      |                                              |
@@ -366,7 +366,7 @@ dit.cli 命令行工具箱:
 ├── predict    载入工件执行未标记队列推理，强制校验 SHA-256 签名与特征列契约
 ├── ablation   执行协变量策略 (none / feature / residualize) 与特征视图全景消融
 ├── matrix     自动化批处理执行 2 任务 (binary/multiclass) × 2 策略基准矩阵
-├── interpret  全量重拟合模型，导出神经解剖节点贡献度热力图与文献比对
+├── interpret  全量重拟合模型，导出神经解剖节点贡献度热力图与文献比对（不支持 --select / --covariate residualize / --control-view）
 ├── fetch      具备安全白名单、防 SSRF 重定向校验与 Socket 钉扎的数据下载器
 └── info       打印当前硬件指纹、Python 运行时、包版本与平台信息
 ```
@@ -420,7 +420,7 @@ DIT-/
 │   │   ├── mat_loader.py        MATLAB 矩阵解析与标量校验
 │   │   ├── preprocessing.py     折内中位数插补与空间高斯平滑滤波
 │   │   ├── schema.py            核心张量契约 DatasetBundle 约束定义
-│   │   ├── selection.py         嵌套 ANOVA 解剖块级与节点级特征筛选
+│   │   ├── selection.py         折内 L1 弹性网解剖块级与节点级特征筛选
 │   │   ├── splits.py            分层 K 折、站点分层与 LOSO 确定性分割
 │   │   └── synthetic.py         确定性伪随机合成医学影像数据引擎
 │   ├── evaluation/
@@ -446,7 +446,7 @@ DIT-/
 ├── legacy/                      历史遗留归档 (禁止执行，作为审计基准保留)
 │   ├── _DO_NOT_RUN.md           历史缺陷分析与执行禁止警示清单
 │   └── afq2020_reference/       2020 竞赛初始代码存档及站点划分清单
-├── tests/                       自动化回归测试套件 (525 个测试用例)
+├── tests/                       自动化回归测试套件 (686 个测试用例)
 ├── LICENSE                      MIT 开源软件许可证文本
 └── pyproject.toml               打包与依赖声明文件
 ```
@@ -475,18 +475,18 @@ pip install -e ".[dev,torch]"
 套件内置确定性合成生理数据，**不依赖外部网络或私有数据**即可执行全部测试验证：
 
 ```bash
-# 完整套件验证 (在包含 PyTorch 的环境中验证全部 525 个测试)
+# 完整套件验证 (在包含 PyTorch 的环境中验证全部 686 个测试)
 pytest -q
-# 输出: 525 passed (2026-10-09, torch 2.6.0+cpu)
+# 输出: 686 passed (2026-11-20, torch 2.6.0+cpu)
 
 # 仅核心套件验证 (无 PyTorch 环境，深度测试安全跳过)
 pytest -q
-# 输出: 411 passed, 11 skipped (2026-10-09)
+# 输出: 567 passed, 11 skipped (2026-11-20, no-torch CI)
 ```
 
 GitHub Actions 持续集成系统在以下环境中自动执行对等验证：
 1. **Ubuntu Linux / Python 3.10**: 验证核心流水线（411 项测试通过，11 项深度测试安全跳过）。
-2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（525 项测试全量通过）。
+2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（686 项测试全量通过）。
 
 ---
 
