@@ -441,6 +441,9 @@ DIT-/
 ├── docs/                        系统工程与审计规范
 │   ├── FROZEN_EXPERIMENT_SPEC.md W0 冻结基准测试协议
 │   ├── USAGE.md                 深度模型与高级评估机制技术详解
+│   ├── AUDIT_2026-11-19.md      2026-11-19 交叉全量审计报告（发现清单与裁定）
+│   ├── REMEDIATION_2026-11-19.md 修复计划、SOP 与逐 commit 执行记录
+│   ├── REVIEW_METHODOLOGY.md    多轮复审方法学（三条铁律与反模式清单）
 │   ├── OPTIMIZATION_PLAN.md     系统历史重写与缺陷根因审计报告
 │   └── LICENSE_TODO.md          知识产权归属与资产合规备忘录
 ├── legacy/                      历史遗留归档 (禁止执行，作为审计基准保留)
