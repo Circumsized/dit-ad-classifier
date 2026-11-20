@@ -70,46 +70,53 @@ def environment_fingerprint(seed: int | None = None) -> dict[str, object]:
 
 def _fold_table(result) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    # Canonical columns first so the report stays diffable; every other key a
+    # runner recorded is passed through below.  An explicit allowlist here
+    # silently dropped real diagnostics (inner_best_score, inner_budget,
+    # residualizer, epochs_requested, weighting_fallback) -- the opposite of
+    # the project's "never silently drop provenance" rule.
+    ordered = (
+        "fold",
+        "n_train",
+        "n_test",
+        "accuracy",
+        "balanced_accuracy",
+        "macro_f1",
+        "sensitivity",
+        "specificity",
+        "roc_auc",
+        "ece",
+        "brier_score",
+        "best_params",
+        "tuning_score",
+        "inner_best_score",
+        "inner_cv",
+        "inner_budget",
+        "training",
+        "alignment_grid",
+        "weights",
+        "weighting_fallback",
+        "base_models",
+        "confusion_matrix",
+        "n_features_used",
+        "residualizer",
+        "selection",
+        "task",
+        "split_strategy",
+        "test_index_digest",
+        "data_digest",
+        "test_class_counts",
+        "held_out_site",
+        "fold_comparable",
+    )
     for fold in result.folds:
         row: dict[str, object] = {
-            "fold": fold.get("fold"),
-            "n_train": fold.get("n_train"),
-            "n_test": fold.get("n_test"),
-            "accuracy": fold.get("accuracy"),
-            "balanced_accuracy": fold.get("balanced_accuracy"),
-            "macro_f1": fold.get("macro_f1"),
-            "sensitivity": fold.get("sensitivity"),
-            "specificity": fold.get("specificity"),
-            "roc_auc": fold.get("roc_auc"),
-            "ece": fold.get("ece"),
-            "brier_score": fold.get("brier_score"),
+            key: fold.get(key) for key in ordered if fold.get(key) is not None
         }
-        # Fit provenance for auditing ensembles: ``weights`` and
-        # ``base_models`` carry the per-fold ensemble composition, including
-        # whether a deep member was calibrated.
-        for key in (
-            "best_params",
-            "tuning_score",
-            "inner_cv",
-            "training",
-            "alignment_grid",
-            "weights",
-            "base_models",
-            "confusion_matrix",
-            "n_features_used",
-            "task",
-            "split_strategy",
-            "test_index_digest",
-            "data_digest",
-            "test_class_counts",
-            "held_out_site",
-            "fold_comparable",
-            "selection",
-        ):
-            value = fold.get(key)
-            if value is not None:
+        for key, value in fold.items():
+            if key not in row and value is not None:
                 row[key] = value
-        rows.append({key: value for key, value in row.items() if value is not None})
+        rows.append(row)
     return rows
 
 

@@ -327,12 +327,32 @@ def load_deployment_artifact(path: str | Path) -> DeploymentModel:
             f"{source} has a malformed 'classes' section; it must be a list of "
             f"integers, got {type(raw_classes).__name__}"
         )
-    classes_ = np.asarray(raw_classes, dtype=int)
+    if not raw_classes or not raw_label_map:
+        # An empty classes/label_map pair passes the set-equality check and
+        # used to defer an IndexError to predict time, outside the CLI's
+        # ValueError contract.
+        raise ValueError(
+            f"{source} has an empty 'classes' or 'label_map' section; it is not "
+            f"a complete version-{ARTIFACT_VERSION} deployment artifact"
+        )
+    try:
+        classes_ = np.asarray(raw_classes, dtype=int)
+    except OverflowError as exc:
+        # A 2**70 label passes the isinstance(int) check and would otherwise
+        # escape as a bare OverflowError outside the CLI contract.
+        raise ValueError(f"{source} has an out-of-range 'classes' entry: {exc}") from exc
     if set(classes_.tolist()) != set(int(key) for key in raw_label_map):
         raise ValueError(
             f"{source}: classes {sorted(classes_.tolist())} and label_map keys "
             f"{sorted(int(key) for key in raw_label_map)} disagree; the artifact "
             "is inconsistent and must be re-fitted"
+        )
+    if len({int(key) for key in raw_label_map}) != len(raw_label_map):
+        # Digit-string keys ("1" and "01") are both accepted for round-trip
+        # compatibility, but two spellings of one class would silently merge.
+        raise ValueError(
+            f"{source}: label_map keys collapse onto duplicate classes after "
+            "normalisation; the artifact is inconsistent and must be re-fitted"
         )
     raw_feature_names = _section(payload_dict, "feature_names", source)
     if not isinstance(raw_feature_names, (list, tuple)):

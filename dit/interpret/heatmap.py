@@ -152,8 +152,14 @@ def render_node_heatmap(
         except OSError as exc:
             # A failed savefig leaves a truncated file behind: delete it and
             # report with the path, instead of a bare traceback plus garbage
-            # on disk (a too-long path or a full disk both land here).
-            target.unlink(missing_ok=True)
+            # on disk (a too-long path or a full disk both land here).  The
+            # cleanup itself can fail on Windows (viewer holds the file
+            # open); losing the cleanup error matters less than losing the
+            # write error, so it is swallowed deliberately.
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise ValueError(f"could not write heatmap {target}: {exc}") from exc
     if show:
         plt.show()

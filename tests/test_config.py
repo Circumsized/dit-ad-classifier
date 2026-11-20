@@ -96,6 +96,13 @@ def test_wrongly_typed_or_ranged_values_are_value_errors(kwargs, message) -> Non
         ExperimentConfig(**kwargs)
 
 
+def test_enable_selection_string_is_refused() -> None:
+    # The third bool field: YAML enable_selection: 'no' would silently enable
+    # selection while the report echoed 'no'.
+    with pytest.raises(ValueError, match="enable_selection must be a boolean"):
+        ExperimentConfig(enable_selection="no")
+
+
 def test_bare_string_ensemble_models_is_refused() -> None:
     # A bare string is iterable, so without the guard the duplicate check
     # would report "must not repeat a model" for a scalar typo.

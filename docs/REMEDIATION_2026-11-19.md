@@ -30,12 +30,14 @@
 | C8 | `fab3172` | `paired_fold_comparison` 15 条拒绝路径全参数化钉住（含正控制防空过） | 39 passed |
 | C9 | `10898af` | 主路径 OOF-argmax 契约独立重算钉住；`SparseBlockSelector` 逐内折重拟合 spy | 11 passed（变异证据见设计记录） |
 | R1 | `950b08a` | fresh-eyes 复审（无 P0/P1，11 项 P3）全部处置：热图碰撞链式消歧、ablation CSV 消毒、binary 门控改钉 `y_true` 单类、展示兜底与解析兜底对齐、删死守卫、interpret 拒绝入文档、单次写 JSON、`md_cell` 反斜杠转义等 | 647 passed |
-| R2 | `7c7428b`..`e31e3bf` | 6 专家交叉复审处置：删两具清理残留尸体；binary_view 接线/LOSO 缺 AD 折/OOF 守卫三承重测试（变异实测杀死）；deployment 全段 ValueError 包装；CSV 类名列消毒；interpret 拒绝 `--alignment`；md_cell 加 caveats；热图截断/大小写折叠/metric 配对；`predict_unlabeled` 经 classes_ 映射；ExperimentConfig 值类型守卫；`tests/test_config.py` 首个 config loader 测试 | 657 passed |
+| R2 | `3ea66c6`..`e31e3bf` | 6 专家交叉复审处置：删两具清理残留尸体；binary_view 接线/LOSO 缺 AD 折/OOF 守卫三承重测试（变异实测杀死）；deployment 全段 ValueError 包装；CSV 类名列消毒；interpret 拒绝 `--alignment`；md_cell 加 caveats；热图截断/大小写折叠/metric 配对；`predict_unlabeled` 经 classes_ 映射；ExperimentConfig 值类型守卫；`tests/test_config.py` 首个 config loader 测试 | 657 passed |
 | R3 | 本轮 | R2 diff 的 3 专家复审 + P3 积压清理：stdout reports tuple 回归（R2 引入，已修）；markdown config 块与 `write_json` 统一 `_json_safe`；`ThresholdPolicy` 构造校验 + `_MAX_PASSES` 命名；`smooth_profiles`/`label_map` docstring 对齐实现；`_choose_axis` 拒绝多轴歧义；Windows 保留名防御；fold 权重回退标记键；导出面补全；`prepare_matrix` 形态统一；summary 列序与 per_site 语义钉扎；`md_cell` 覆盖全部 Python 行分隔符；`threshold_criterion` tuple 成员测试；config.py 非映射 experiment 与混合键排序；deployment label_map 键/classes 强转/不变量校验；savefig 失败清理半写文件；ruff 工具链（F821/F841/E9）入 dev extras 并全绿 | 最终计数见 §5 |
+| R4 | 本轮（核查） | 4 位证伪型专家核验终报：5/7 声明完全属实；失实项集中在元陈述（例外清单漏列 C12 删除的 10 个测试函数、日志悬空 sha `7c7428b`、过时计数、README 测试数）——全部修正。真实代码发现：`enable_selection` 漏出 bool 守卫（P2，YAML 字符串静默开启选择）；`_fold_table` 白名单静默丢弃 5 个真实折诊断键（不变量守护员 R1）——改为规范键优先 + 其余键透传（契约反转已在其测试中声明）；deployment 空 classes 对/超大 int/数字字符串键碰撞；savefig 清理失败吞错；`_choose_axis` 文档如实化 + point 轴消息名词。`write_json` 的 NaN→null 取舍与其余 P3 记入未决清单 | 见 §5 |
 
-净结果：**525 → 637 passed**（C12 移除 10 个仅服务于被删 API 的用例；生产路径
-测试净增 122 个），无既有断言被弱化（唯一删除是随死代码移除的
-`threshold_sweep` 专属测试，commit message 已声明）。
+净结果（截至 R3）：**525 → 676 passed**（生产路径测试净增 151 个；C12 移除
+10 个仅服务于被删 API 的测试函数——这些删除随 C12/R2 的 commit 记录在案，另有
+`write_json` 的 NaN 契约测试在 R3 反转为钉住 null 映射）。各时点计数：
+647（R1）→ 637（C12，-10）→ 657（R2）→ 676（R3）。
 
 ## 3. 每修复循环 SOP（本批实际执行）
 

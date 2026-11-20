@@ -436,8 +436,8 @@ def cmd_ablation(args: argparse.Namespace) -> int:
         include_covariate_comparisons=True,
     )
     written = _write_all(args.out, payload, "ablation")
-    # Strict JSON so an out-of-range float raises instead of emitting a bare
-    # NaN that downstream parsers reject.
+    # Strict JSON with non-finite floats mapped to null (write_json runs
+    # _json_safe first), so a NaN metric cannot emit a bare NaN token.
     written.append(write_json(Path(args.out) / "ablation_table.json", rows))
     written.append(_write_ablation_csv(args.out, rows))
     _write_markdown_table(args.out, rows, written)

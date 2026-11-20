@@ -166,8 +166,9 @@ class ExperimentConfig:
             if not isinstance(value, str):
                 raise ValueError(f"{name} must be a string, got {type(value).__name__}")
         # Bool fields silently truthify a string ("no" would enable
-        # determinism and the report would claim the opposite of the config).
-        for name in ("deep_deterministic", "include_missing_pattern"):
+        # determinism / selection and the report would claim the opposite of
+        # the config).
+        for name in ("deep_deterministic", "include_missing_pattern", "enable_selection"):
             value = getattr(self, name)
             if not isinstance(value, bool):
                 raise ValueError(f"{name} must be a boolean, got {type(value).__name__}")
