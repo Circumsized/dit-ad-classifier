@@ -481,11 +481,11 @@ pytest -q
 
 # 仅核心套件验证 (无 PyTorch 环境，深度测试安全跳过)
 pytest -q
-# 输出: 573 passed, 11 skipped (2026-11-20, no-torch CI)
+# 输出: 576 passed, 11 skipped (2026-11-20, no-torch CI)
 ```
 
 GitHub Actions 持续集成系统在以下环境中自动执行对等验证：
-1. **Ubuntu Linux / Python 3.10**: 验证核心流水线（573 项测试通过，11 项深度测试安全跳过）。
+1. **Ubuntu Linux / Python 3.10**: 验证核心流水线（576 项测试通过，11 项深度测试安全跳过）。
 2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（689 项测试全量通过）。
 
 ---

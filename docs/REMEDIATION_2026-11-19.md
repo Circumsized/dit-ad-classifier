@@ -36,7 +36,7 @@
 
 > R4 覆盖缺口（如实记录）：第 4 位证伪型审查（过度声明审查）首轮因会话中断未返回，已重派并补跑；其余 3 位（声明证伪、对抗探针、不变量守护）报告完整。
 
-| R4b | 本轮 | 过度声明审查（重派）处置：**幻影删除**——`experiment_payload_of_base` 三次声称删除仍在，本次真正删除并新增「删除契约」测试钉住（F821/F841 结构上抓不到零引用定义）；C12 测试计数统一为 10 函数（§4 与 message 错误已注记）；`_results_table` 三处裸 `float()` 补 null 守卫、`_json_block` 同步 `_json_safe`、`fold_metric_spread` 接受显式 None、`_json_safe` docstring 的 null 语义改写；README 六处测试数刷新（689 / no-torch 计数以 CI 实测为准，见 §5）；§4 建立真实未决清单；R4 行交叉引用校正 + 覆盖缺口如实记录；ECE `n_bins` 类型守卫（含 `True` 静默 1-bin）提交 | 见 §5 |
+| R4b | 本轮 | 过度声明审查（重派）处置：**幻影删除**——`experiment_payload_of_base` 三次声称删除仍在，本次真正删除并新增「删除契约」测试钉住（F821/F841 结构上抓不到零引用定义）；C12 测试计数统一为 10 函数（§4 与 message 错误已注记）；`_results_table` 三处裸 `float()` 补 null 守卫、`_json_block` 同步 `_json_safe`、`fold_metric_spread` 接受显式 None、`_json_safe` docstring 的 null 语义改写；README 六处测试数刷新（689 / no-torch 576+11，均以 CI run 44707586128 实测为准）；§4 建立真实未决清单；R4 行交叉引用校正 + 覆盖缺口如实记录；ECE `n_bins` 类型守卫（含 `True` 静默 1-bin）提交 | 见 §5 |
 
 净结果（截至 R4b 复审修复二批）：**525 → 689 passed**（生产路径测试净增 164 个；C12 移除
 10 个仅服务于被删 API 的测试函数——这些删除随 C12/R2 的 commit 记录在案，另有
