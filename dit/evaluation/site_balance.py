@@ -168,7 +168,7 @@ def fold_macro_summary(
     per_metric: dict[str, object] = {}
     for metric in metrics:
         values = [
-            float(fold[metric])
+            np.nan if fold.get(metric) is None else float(fold[metric])
             for fold in comparable
             if metric in fold and np.isfinite(float(fold[metric]))
         ]

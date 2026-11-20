@@ -16,11 +16,11 @@ def test_removed_evaluation_helpers_are_gone() -> None:
     import dit.evaluation.threshold as threshold
 
     for name in ("evaluate_classical", "evaluate_metric_ensemble", "_inner_cv"):
-        assert not hasattr(runner, name), name
+        assert not hasattr(runner, name), f"{runner.__name__}.{name} must stay deleted"
     for name in ("_apply_residualizer", "to_fold_dicts", "experiment_payload_of_base"):
-        assert not hasattr(experiment, name), name
+        assert not hasattr(experiment, name), f"{experiment.__name__}.{name} must stay deleted"
     for name in ("apply_policy", "threshold_sweep"):
-        assert not hasattr(threshold, name), name
+        assert not hasattr(threshold, name), f"{threshold.__name__}.{name} must stay deleted"
 
 
 def test_removed_data_helpers_are_gone() -> None:
@@ -41,4 +41,7 @@ def test_removed_data_helpers_are_gone() -> None:
 def test_removed_cli_wrapper_is_gone() -> None:
     import dit.cli.main as main
 
-    assert not hasattr(main, "experiment_payload_of_base")
+    assert not hasattr(main, "experiment_payload_of_base"), (
+        f"{main.__name__}.experiment_payload_of_base must stay deleted "
+        "(deletion ledger: docs/REMEDIATION_2026-11-19.md, C11/R4b)"
+    )

@@ -23,7 +23,10 @@ def expected_calibration_error(y_true, probabilities, n_bins: int = 10) -> float
     """Compute confidence-based expected calibration error."""
 
     if isinstance(n_bins, bool) or not isinstance(n_bins, (int, np.integer)):
-        raise ValueError(f"n_bins must be an integer, got {type(n_bins).__name__}")
+        raise ValueError(
+            f"n_bins must be an integer, got {type(n_bins).__name__} "
+            "(booleans are not bin counts)"
+        )
     if n_bins < 1:
         raise ValueError("n_bins must be >= 1")
     true = np.asarray(y_true, dtype=int).reshape(-1)

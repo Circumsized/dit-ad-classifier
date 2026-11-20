@@ -266,11 +266,14 @@ def _json_safe(value: object) -> object:
     """Replace non-finite floats before strict JSON serialization.
 
     Semantics at the file boundary: a non-finite number (NaN/inf from a
-    computed metric) becomes JSON ``null`` with its key present; a key that
-    was never recorded (explicit ``None`` in a fold report) is dropped by the
-    table builders and is simply absent. A reader can therefore tell "the
-    metric was computed and came out non-finite" from "the metric was not
-    recorded". Scalar and container types are preserved recursively.
+    computed metric) becomes JSON ``null`` with its key present, while the
+    fold table builders drop an explicit ``None`` so the key is absent --
+    that distinction holds for fold rows.  Two caveats for readers: an
+    explicit ``None`` recorded by a runner (not computable, not applicable,
+    or not selected -- e.g. ``roc_auc`` on a single-class fold, an unset
+    ``deep_calibration``, an untested comparison's ``p_value``) also lands
+    as key-present null; and nested ``None`` inside ``base_models`` is not
+    dropped.  Scalar and container types are preserved recursively.
     """
 
     if isinstance(value, np.bool_):
@@ -416,6 +419,25 @@ def md_cell(value: object) -> str:
     return str(value).translate(_MD_CELL_ESCAPES)
 
 
+def num_cell(value: object, digits: int = 3) -> str:
+    """Format one numeric report cell; null/non-finite renders as "-".
+
+    Shared by the results and ablation tables so a metric that came out
+    non-finite (JSON null) reads as "not available" in both, instead of
+    one table crashing and the other printing "nan".
+    """
+
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise
+    if not np.isfinite(number):
+        return "-"
+    return f"{number:.{digits}f}"
+
+
 def _json_block(value: object) -> str:
     # Same boundary as write_json: non-finite floats become null rather than
     # crashing the Markdown render half-way through a report.
@@ -479,10 +501,10 @@ def _results_table(results: list[dict[str, object]]) -> str:
                 # null (non-finite metric) renders as "-" here; a bare
                 # float(None) would crash the Markdown after the JSON was
                 # already written.
-                acc=(f"{float(aggregate['accuracy']):.3f}" if aggregate.get("accuracy") is not None else "-"),
-                auc=(f"{float(aggregate['roc_auc']):.3f}" if aggregate.get("roc_auc") is not None else "-"),
-                f1=(f"{float(aggregate['macro_f1']):.3f}" if aggregate.get("macro_f1") is not None else "-"),
-                bal=(f"{float(aggregate['balanced_accuracy']):.3f}" if aggregate.get("balanced_accuracy") is not None else "-"),
+                acc=num_cell(aggregate.get("accuracy")),
+                auc=num_cell(aggregate.get("roc_auc")),
+                f1=num_cell(aggregate.get("macro_f1")),
+                bal=num_cell(aggregate.get("balanced_accuracy")),
                 sens=(
                     f"{float(aggregate['sensitivity']):.3f}"
                     if aggregate.get("sensitivity") is not None

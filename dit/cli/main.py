@@ -38,6 +38,7 @@ from dit.evaluation.reporting import (
     build_covariate_ablation_comparisons,
     environment_fingerprint,
     md_cell,
+    num_cell,
     write_json,
     write_markdown,
 )
@@ -493,16 +494,18 @@ def _write_markdown_table(out_dir: str | Path, rows: list[dict[str, object]], wr
     lines = ["# Ablation table", "", header, "|" + "---|" * 9]
     for row in rows:
         lines.append(
-            "| {model} | {view} | {cov} | {acc:.3f} | {bal:.3f} | {f1:.3f} | {auc} | {am:.3f} | {thr:.2f} |".format(
+            "| {model} | {view} | {cov} | {acc} | {bal} | {f1} | {auc} | {am} | {thr} |".format(
                 model=md_cell(row["model"]),
                 view=md_cell(row["view"]),
                 cov=md_cell(row["covariate_strategy"]),
-                acc=float(row["accuracy"]),
-                bal=float(row["balanced_accuracy"]),
-                f1=float(row["macro_f1"]),
-                auc=(f"{float(row['roc_auc']):.3f}" if row.get("roc_auc") is not None else "-"),
-                am=float(row["aggregate_argmax_accuracy"]),
-                thr=float(row["threshold"]),
+                # Shared cell formatter: a null metric renders "-" instead of
+                # crashing this table after the JSON and CSV were written.
+                acc=num_cell(row["accuracy"]),
+                bal=num_cell(row["balanced_accuracy"]),
+                f1=num_cell(row["macro_f1"]),
+                auc=num_cell(row.get("roc_auc")),
+                am=num_cell(row["aggregate_argmax_accuracy"]),
+                thr=num_cell(row["threshold"], digits=2),
             )
         )
     target = Path(out_dir) / "ablation_table.md"

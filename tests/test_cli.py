@@ -449,3 +449,32 @@ def test_rad_scores_csv_neutralises_hostile_class_names(tmp_path) -> None:
         assert not row[1].startswith(("=", "+", "-")), row
         assert not row[2].startswith(("=", "+", "-")), row
     assert header[-1] == "p_'-2"
+
+
+def test_ablation_markdown_renders_null_metrics_as_dash(tmp_path) -> None:
+    import csv
+
+    from dit.cli.main import _write_markdown_table
+
+    rows = [
+        {
+            "model": "linear_svm",
+            "view": "summary",
+            "covariate_strategy": "feature",
+            "accuracy": None,
+            "balanced_accuracy": 0.5,
+            "macro_f1": None,
+            "roc_auc": None,
+            "aggregate_argmax_accuracy": 0.5,
+            "threshold": 0.5,
+            "threshold_criterion": "f1",
+        }
+    ]
+    _write_markdown_table(tmp_path, rows, [])
+    text = (tmp_path / "ablation_table.md").read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines() if line.startswith("| linear_svm"))
+    cells = [cell.strip() for cell in row.split("|")]
+    # columns: model | view | covariate | ACC | bal.ACC | F1 | AUC | argmax ACC | thr
+    assert cells[4] == "-" and cells[6] == "-" and cells[7] == "-"
+    assert cells[5] == "0.500" and cells[8] == "0.500" and cells[9] == "0.50"
+    assert row.count("|") == 10

@@ -36,12 +36,12 @@
 
 > R4 覆盖缺口（如实记录）：第 4 位证伪型审查（过度声明审查）首轮因会话中断未返回，已重派并补跑；其余 3 位（声明证伪、对抗探针、不变量守护）报告完整。
 
-| R4b | 本轮 | 过度声明审查（重派）处置：**幻影删除**——`experiment_payload_of_base` 三次声称删除仍在，本次真正删除并新增「删除契约」测试钉住（F821/F841 结构上抓不到零引用定义）；C12 测试计数统一为 10 函数（§4 与 message 错误已注记）；`_results_table` 三处裸 `float()` 补 null 守卫、`_json_block` 同步 `_json_safe`、`fold_metric_spread` 接受显式 None、`_json_safe` docstring 的 null 语义改写；README 五处测试数刷新（681 / no-torch 567+11）；§4 建立真实未决清单；R4 行计数与独立性措辞校正；ECE `n_bins` 类型守卫（含 `True` 静默 1-bin）提交 | 见 §5 |
+| R4b | 本轮 | 过度声明审查（重派）处置：**幻影删除**——`experiment_payload_of_base` 三次声称删除仍在，本次真正删除并新增「删除契约」测试钉住（F821/F841 结构上抓不到零引用定义）；C12 测试计数统一为 10 函数（§4 与 message 错误已注记）；`_results_table` 三处裸 `float()` 补 null 守卫、`_json_block` 同步 `_json_safe`、`fold_metric_spread` 接受显式 None、`_json_safe` docstring 的 null 语义改写；README 六处测试数刷新（689 / no-torch 计数以 CI 实测为准，见 §5）；§4 建立真实未决清单；R4 行交叉引用校正 + 覆盖缺口如实记录；ECE `n_bins` 类型守卫（含 `True` 静默 1-bin）提交 | 见 §5 |
 
-净结果（截至 R4b）：**525 → 686 passed**（生产路径测试净增 171 个；C12 移除
+净结果（截至 R4b 复审修复二批）：**525 → 689 passed**（生产路径测试净增 164 个；C12 移除
 10 个仅服务于被删 API 的测试函数——这些删除随 C12/R2 的 commit 记录在案，另有
 `write_json` 的 NaN 契约测试在 R3 反转为钉住 null 映射）。各时点计数：
-647（R1）→ 637（C12，-10）→ 657（R2）→ 676（R3）→ 681（R4）→ 686（R4b）。
+647（R1）→ 637（C12，-10）→ 657（R2）→ 676（R3）→ 680（R4）→ 686（R4b）→ 688（R4b 复审修复）→ 689（复审修复二批）。
 
 ## 3. 每修复循环 SOP（本批实际执行）
 
@@ -81,7 +81,7 @@
 
 ```bash
 cd DIT-
-.venv/Scripts/python.exe -m pytest tests/ -q        # 686 passed @ R4b（CI head 见 PR #1）
+.venv/Scripts/python.exe -m pytest tests/ -q        # 689 passed @ 复审修复二批（CI head 见 main）
 .venv/Scripts/python.exe -m ruff check dit/ tests/  # F821/F841/E9 全绿
 git diff b33c8c7..HEAD --stat                       # 修复 commit 全集
 ```

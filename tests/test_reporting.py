@@ -459,7 +459,18 @@ def test_markdown_results_table_renders_null_aggregates_as_dash() -> None:
     rendered = render_markdown(payload)
     row = next(line for line in rendered.splitlines() if line.startswith("| linear_svm"))
     assert row.count("|") == 12
-    assert "-" in row
+    # Pin the cells, not mere presence: rendering "None"/"nan" here would
+    # pass an existence check but mislead every reader.
+    cells = [cell.strip() for cell in row.split("|")]
+    assert cells[5:11] == ["-"] * 6
+    # And the same payload's JSON keeps the keys with null values.
+    serialized = json.loads(json.dumps(payload, allow_nan=False))
+    aggregate = serialized["results"][0]["aggregate"]
+    assert all(
+        aggregate[key] is None
+        for key in ("accuracy", "macro_f1", "balanced_accuracy", "roc_auc",
+                    "sensitivity", "specificity")
+    )
 
 
 def test_fold_spread_treats_explicit_none_as_unrecorded() -> None:
@@ -485,3 +496,51 @@ def test_fold_spread_treats_explicit_none_as_unrecorded() -> None:
     spread = payload["results"][0]["fold_metric_spread"]
     assert spread["accuracy"]["n_folds"] == 0  # None filtered as non-finite
     json.dumps(payload, allow_nan=False)
+
+
+def test_results_table_finite_values_render_three_decimals() -> None:
+    # Pins the template-equivalence side of the null guard: a preformatted
+    # string must render exactly like the old `{value:.3f}` template did.
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={
+            "accuracy": 0.8333333,
+            "balanced_accuracy": 0.8125,
+            "macro_f1": 0.790123,
+            "roc_auc": 0.9,
+            "sensitivity": 0.88,
+            "specificity": 0.75,
+        },
+        folds=(),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    row = next(line for line in render_markdown(payload).splitlines() if line.startswith("| linear_svm"))
+    assert row == (
+        "| linear_svm | binary | stratified | summary/feature | "
+        "0.833 | 0.900 | 0.790 | 0.812 | 0.880 | 0.750 | 0 |"
+    )
+    assert row.count("|") == 12
+
+
+def test_markdown_json_blocks_sanitise_non_finite_values() -> None:
+    # _json_block shares the write_json boundary: an unsanitised payload with
+    # a NaN section must render as null, not crash strict serialisation.
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5, "roc_auc": None},
+        folds=(),
+    )
+    payload = assemble_report(
+        [hostile],
+        dataset_summary={"missing_fraction": float("nan"), "n_samples": 30},
+        configuration={},
+    )
+    rendered = render_markdown(payload)
+    assert "NaN" not in rendered
+    assert '"missing_fraction": null' in rendered
