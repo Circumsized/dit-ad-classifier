@@ -434,3 +434,54 @@ def test_fold_table_passes_through_every_recorded_diagnostic() -> None:
     ):
         assert key in row, key
     json.dumps(row, allow_nan=False)
+
+
+def test_markdown_results_table_renders_null_aggregates_as_dash() -> None:
+    # A non-finite aggregate metric becomes null in JSON; the Markdown table
+    # must render "-" instead of crashing on float(None) after the JSON was
+    # already written.
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={
+            "accuracy": None,
+            "balanced_accuracy": None,
+            "macro_f1": None,
+            "roc_auc": None,
+            "sensitivity": None,
+            "specificity": None,
+        },
+        folds=(),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    rendered = render_markdown(payload)
+    row = next(line for line in rendered.splitlines() if line.startswith("| linear_svm"))
+    assert row.count("|") == 12
+    assert "-" in row
+
+
+def test_fold_spread_treats_explicit_none_as_unrecorded() -> None:
+    # float(None) used to crash the report assembly when a fold recorded an
+    # explicit null metric.
+    fold = {
+        "fold": "0",
+        "n_train": 10,
+        "n_test": 5,
+        "accuracy": None,
+        "balanced_accuracy": 0.8,
+        "macro_f1": 0.7,
+    }
+    hostile = SimpleNamespace(
+        model="linear_svm",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={"accuracy": 0.5, "balanced_accuracy": 0.5, "macro_f1": 0.5, "roc_auc": None},
+        folds=(fold,),
+    )
+    payload = assemble_report([hostile], dataset_summary={}, configuration={})
+    spread = payload["results"][0]["fold_metric_spread"]
+    assert spread["accuracy"]["n_folds"] == 0  # None filtered as non-finite
+    json.dumps(payload, allow_nan=False)

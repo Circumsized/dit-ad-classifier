@@ -381,7 +381,7 @@ python -m dit.cli interpret --mat MCAD_AFQ_competition.mat --view profile --out 
 | | `--out` | 目录路径 | `reports` | 报告输出目录，生成 `evaluation.json` 与 `evaluation.md`。 |
 | `fit` | `--artifact` | 文件路径 | 必须指定 | 模型序列化导出路径。自动生成同名 `.sha256` 侧车哈希文件。 |
 | `predict` | `--artifact` | 文件路径 | 必须指定 | 模型输入路径。前置校验 SHA-256 签名，未通过则直接拒绝执行。 |
-| | `--out` | 文件路径 | 必须指定 | 结构化预测结果 CSV 导出路径。 |
+| | `--out` | 文件路径 | 必须指定 | 结构化预测结果 CSV 导出路径。（`rad_scores.csv` 与预测 CSV 的文本单元格会中和电子表格公式注入：以 `=`/`+`/`-`/`@`/制表符/换行开头的值会加前导撇号 `'`，属有损转换，下游 join 前需去除。） |
 | `ablation` | `--model` | 字符串 | `linear_svm` | 执行协变量策略（none/feature/residualize）扫描，导出配对消融表。 |
 | `matrix` | `--model` | 字符串 | `linear_svm` | 批处理执行 2 任务 × 2 策略全景矩阵扫描，导出 `matrix_summary.json`。 |
 | `interpret` | `--view` | 字符串 | `profile` | 全量拟合模型，导出 $18 \times 100$ 解剖节点贡献热力图及文献对齐报告。 |

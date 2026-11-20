@@ -446,7 +446,7 @@ DIT-/
 ├── legacy/                      历史遗留归档 (禁止执行，作为审计基准保留)
 │   ├── _DO_NOT_RUN.md           历史缺陷分析与执行禁止警示清单
 │   └── afq2020_reference/       2020 竞赛初始代码存档及站点划分清单
-├── tests/                       自动化回归测试套件 (525 个测试用例)
+├── tests/                       自动化回归测试套件 (686 个测试用例)
 ├── LICENSE                      MIT 开源软件许可证文本
 └── pyproject.toml               打包与依赖声明文件
 ```
@@ -475,18 +475,18 @@ pip install -e ".[dev,torch]"
 套件内置确定性合成生理数据，**不依赖外部网络或私有数据**即可执行全部测试验证：
 
 ```bash
-# 完整套件验证 (在包含 PyTorch 的环境中验证全部 525 个测试)
+# 完整套件验证 (在包含 PyTorch 的环境中验证全部 686 个测试)
 pytest -q
-# 输出: 676 passed (2026-11-20, torch 2.6.0+cpu)
+# 输出: 686 passed (2026-11-20, torch 2.6.0+cpu)
 
 # 仅核心套件验证 (无 PyTorch 环境，深度测试安全跳过)
 pytest -q
-# 输出: 411 passed, 11 skipped (2026-10-09)
+# 输出: 567 passed, 11 skipped (2026-11-20, no-torch CI)
 ```
 
 GitHub Actions 持续集成系统在以下环境中自动执行对等验证：
 1. **Ubuntu Linux / Python 3.10**: 验证核心流水线（411 项测试通过，11 项深度测试安全跳过）。
-2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（525 项测试全量通过）。
+2. **Ubuntu Linux / Python 3.12**: 验证完整流水线（686 项测试全量通过）。
 
 ---
 
