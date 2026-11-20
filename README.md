@@ -2,8 +2,8 @@
 
 基于弥散张量成像（DTI）自动化纤维束定量分析（AFQ）特征，实现阿尔茨海默病（AD）二分类与三分类判别的系统管线。
 
-> 首次了解本项目：请先阅读 [`docs/TUTORIAL.md`](docs/TUTORIAL.md)
-> （快速上手 + 技术原理 + 架构导览，约 40 分钟）；想了解科学背景与假设，读
+> 想了解技术机制：读 [`docs/TECHNICAL_MANUAL.md`](docs/TECHNICAL_MANUAL.md)
+> （按专题的技术手册）；想了解科学动机与假设：读
 > [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)；本 README 为工程手册。
 
 ---
@@ -443,7 +443,7 @@ DIT-/
 │   ├── deployment.py            模型工件序列化、SHA-256 签名与反序列化引擎
 │   └── interpret/               解剖贡献权重映射、热力图绘制与文献区间对齐
 ├── docs/                        系统工程与审计规范
-│   ├── TUTORIAL.md               技术教程与入门指南（快速上手/原理/架构导览）
+│   ├── TECHNICAL_MANUAL.md       技术手册（按专题的机制/规则/接口约定）
 │   ├── PROJECT_OVERVIEW.md       项目科学介绍（背景、假设、方法学与声明边界）
 │   ├── FROZEN_EXPERIMENT_SPEC.md W0 冻结基准测试协议
 │   ├── USAGE.md                 深度模型与高级评估机制技术详解
