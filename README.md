@@ -477,7 +477,7 @@ pip install -e ".[dev,torch]"
 ```bash
 # 完整套件验证 (在包含 PyTorch 的环境中验证全部 525 个测试)
 pytest -q
-# 输出: 525 passed (2026-10-09, torch 2.6.0+cpu)
+# 输出: 676 passed (2026-11-20, torch 2.6.0+cpu)
 
 # 仅核心套件验证 (无 PyTorch 环境，深度测试安全跳过)
 pytest -q

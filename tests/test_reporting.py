@@ -28,7 +28,13 @@ from dit.evaluation.reporting import (
 
 
 class TestFoldTable:
-    def test_provenance_keys_are_kept(self) -> None:
+    def test_every_recorded_fold_key_reaches_the_report(self) -> None:
+        # Contract reversal (2026-11-20): the table used to filter fold keys
+        # through an explicit allowlist, which silently dropped real
+        # diagnostics whenever a runner gained a key (inner_best_score,
+        # inner_budget, residualizer, epochs_requested, weighting_fallback
+        # all vanished).  The project rule is that provenance is never
+        # silently dropped, so unknown keys now pass through.
         class FakeResult:
             folds = [
                 {
@@ -58,7 +64,7 @@ class TestFoldTable:
                     "test_class_counts": {"0": 8, "1": 7},
                     "held_out_site": "site-0",
                     "inner_cv": "site_grouped",
-                    "a_dropped_key": "should not appear",
+                    "a_new_diagnostic": "now appears",
                 }
             ]
 
@@ -80,9 +86,9 @@ class TestFoldTable:
             "data_digest",
             "test_class_counts",
             "held_out_site",
+            "a_new_diagnostic",
         ):
             assert key in row, key
-        assert "a_dropped_key" not in row
         # The payload must round-trip, or the report is not a report.
         assert json.loads(json.dumps(row))["base_models"][0]["model"] == "logistic"
 
@@ -381,3 +387,50 @@ def test_paired_comparison_caveats_cannot_forge_markdown_structure() -> None:
     assert not any(line.startswith("| fake") for line in lines)
     caveat_line = next(line for line in lines if line.startswith("> ") and "Injected" in line)
     assert "\n" not in caveat_line
+
+
+def test_fold_table_passes_through_every_recorded_diagnostic() -> None:
+    # The old explicit allowlist silently dropped real fold diagnostics
+    # (inner_best_score, inner_budget, residualizer, epochs_requested,
+    # weighting_fallback); the table now passes unknown keys through.
+    from dit.evaluation.runner import EvaluationResult
+
+    fold = {
+        "fold": "0",
+        "n_train": 10,
+        "n_test": 5,
+        "accuracy": 0.8,
+        "balanced_accuracy": 0.8,
+        "macro_f1": 0.8,
+        "sensitivity": 0.9,
+        "specificity": 0.7,
+        "inner_best_score": 0.77,
+        "inner_budget": {"n_candidates": 9, "n_fits": 19},
+        "weighting_fallback": True,
+        "residualizer": {"include_intercept": True},
+        "test_index_digest": "d" * 64,
+        "task": "binary",
+        "split_strategy": "stratified",
+        "test_class_counts": {"0": 3, "1": 2},
+        "fold_comparable": True,
+    }
+    result = EvaluationResult(
+        model="ensemble",
+        task="binary",
+        split_strategy="stratified",
+        feature_view="summary/feature",
+        aggregate={},
+        folds=(fold,),
+        predictions=np.zeros(2, dtype=int),
+        probabilities=np.full((2, 2), 0.5),
+    )
+    row = _fold_table(result)[0]
+    for key in (
+        "inner_best_score",
+        "inner_budget",
+        "weighting_fallback",
+        "residualizer",
+        "test_index_digest",
+    ):
+        assert key in row, key
+    json.dumps(row, allow_nan=False)

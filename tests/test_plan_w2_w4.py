@@ -613,6 +613,60 @@ class TestDeploymentClosure:
         with pytest.raises(ValueError, match="malformed 'classes'"):
             load_deployment_artifact(target)
 
+    def test_load_refuses_empty_sections(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # An empty pair passes the set-equality check and used to defer an
+        # IndexError (outside the CLI's ValueError contract) to predict time.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [],
+            }
+        )
+        target = tmp_path / "empty.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="empty 'classes'"):
+            load_deployment_artifact(target)
+
+    def test_load_refuses_an_out_of_range_class(self, tmp_path) -> None:
+        import hashlib
+        import pickle as pickle_module
+
+        from dit.deployment import ARTIFACT_VERSION, _digest_path, load_deployment_artifact
+
+        # 2**70 passes the isinstance(int) check and used to escape as a bare
+        # OverflowError from the C-long conversion.
+        payload = pickle_module.dumps(
+            {
+                "artifact_version": ARTIFACT_VERSION,
+                "config": {"model": "linear_svm"},
+                "pipeline": "dummy",
+                "label_map": {0: "NC"},
+                "feature_names": ["f"],
+                "data_digest": "digest",
+                "best_params": {},
+                "classes": [0, 2**70],
+            }
+        )
+        target = tmp_path / "huge.pkl"
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        _digest_path(target).write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="out-of-range 'classes'"):
+            load_deployment_artifact(target)
+
     def test_load_refuses_disagreeing_classes_and_label_map(self, tmp_path) -> None:
         import hashlib
         import pickle as pickle_module
